@@ -89,6 +89,19 @@ function get_or_create_sub_port(){
     echo "$port"
 }
 
+function get_or_create_sub_uuid(){
+    local uuid_file="/etc/suoha_sub_uuid"
+    local sub_uuid=""
+    if [ -f "$uuid_file" ]; then
+        sub_uuid=$(cat "$uuid_file" | tr -d '\n\r ')
+    fi
+    if [[ -z "$sub_uuid" || ! "$sub_uuid" =~ ^[a-fA-F0-9-]+$ ]]; then
+        sub_uuid=$(cat /proc/sys/kernel/random/uuid)
+        echo "$sub_uuid" > "$uuid_file"
+    fi
+    echo "$sub_uuid"
+}
+
 function start_sub_server(){
     local web_dir="$1"
     local port="$2"
@@ -106,8 +119,14 @@ function start_sub_server(){
 
 function sync_to_static_web(){
     local src_dir="$1"
-    local static_dir="/var/www/suoha_sub"
+    local sub_uuid
+    sub_uuid=$(get_or_create_sub_uuid)
+    local base_dir="/var/www/suoha_sub"
+    local static_dir="${base_dir}/${sub_uuid}"
     mkdir -p "$static_dir" >/dev/null 2>&1
+    rm -f "${base_dir}/nodes.txt" "${base_dir}/sub.txt" "${base_dir}/clash.yaml" 2>/dev/null
+    : > "${base_dir}/index.html" 2>/dev/null
+    : > "${static_dir}/index.html" 2>/dev/null
     [ -f "${src_dir}/nodes.txt" ] && cp -f "${src_dir}/nodes.txt" "${static_dir}/nodes.txt" 2>/dev/null
     [ -f "${src_dir}/sub.txt" ] && cp -f "${src_dir}/sub.txt" "${static_dir}/sub.txt" 2>/dev/null
     [ -f "${src_dir}/clash.yaml" ] && cp -f "${src_dir}/clash.yaml" "${static_dir}/clash.yaml" 2>/dev/null
@@ -369,11 +388,12 @@ if [ -z "$server_ip" ]; then
 fi
 
 sub_port=$(get_or_create_sub_port)
+sub_uuid=$(get_or_create_sub_uuid)
 sync_to_static_web "/opt/suoha_quick"
 start_sub_server "/var/www/suoha_sub" "$sub_port"
 
-sub_online_url="http://${server_ip}:${sub_port}/sub.txt"
-clash_online_url="http://${server_ip}:${sub_port}/clash.yaml"
+sub_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/sub.txt"
+clash_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/clash.yaml"
 
 cat>v2ray.txt<<EOF
 ======================== 一键梭哈 443 TLS 节点列表 ========================
@@ -397,7 +417,7 @@ clash://install-config?url=${clash_online_url}
 4. Clash 在线配置文件直链:
 ${clash_online_url}
 
-持久订阅存储目录: /var/www/suoha_sub/
+持久订阅存储目录: /var/www/suoha_sub/${sub_uuid}/
 =====================================================================
 EOF
 
@@ -574,8 +594,9 @@ except Exception:
     sync_to_static_web "$xray_dir"
 
     local sub_port=$(get_or_create_sub_port)
+    local sub_uuid=$(get_or_create_sub_uuid)
     local server_ip=$(get_server_ip)
-    local sub_online_url="http://${server_ip}:${sub_port}/sub.txt"
+    local sub_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/sub.txt"
 
     clear
     echo "=========================================================="
@@ -824,11 +845,12 @@ if [ -z "$server_ip" ]; then
 fi
 
 sub_port=$(get_or_create_sub_port)
+sub_uuid=$(get_or_create_sub_uuid)
 sync_to_static_web "/opt/suoha"
 start_sub_server "/var/www/suoha_sub" "$sub_port"
 
-sub_online_url="http://${server_ip}:${sub_port}/sub.txt"
-clash_online_url="http://${server_ip}:${sub_port}/clash.yaml"
+sub_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/sub.txt"
+clash_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/clash.yaml"
 
 cat>/opt/suoha/v2ray.txt<<EOF
 ======================== 节点连接信息 ========================
@@ -852,7 +874,7 @@ clash://install-config?url=${clash_online_url}
 4. Clash 在线配置文件直链:
 ${clash_online_url}
 
-持久订阅存储目录: /var/www/suoha_sub/
+持久订阅存储目录: /var/www/suoha_sub/${sub_uuid}/
 ==============================================================
 EOF
 
@@ -1006,7 +1028,7 @@ then
     kill -9 \$(ps -ef | grep xray | grep -v grep | awk '{print \$1}') >/dev/null 2>&1
     kill -9 \$(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print \$1}') >/dev/null 2>&1
     pkill -f "http.server" >/dev/null 2>&1
-    rm -rf /opt/suoha /opt/suoha_quick /etc/local.d/cloudflared.start /etc/local.d/xray.start /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /var/www/suoha_sub
+    rm -rf /opt/suoha /opt/suoha_quick /etc/local.d/cloudflared.start /etc/local.d/xray.start /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
     echo 所有服务都卸载完成
     echo 彻底删除授权记录
     echo 请访问 https://dash.cloudflare.com/profile/api-tokens
@@ -1092,7 +1114,7 @@ then
     kill -9 \$(ps -ef | grep xray | grep -v grep | awk '{print \$2}') >/dev/null 2>&1
     kill -9 \$(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print \$2}') >/dev/null 2>&1
     pkill -f "http.server" >/dev/null 2>&1
-    rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /var/www/suoha_sub
+    rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
     systemctl --system daemon-reload
     echo 所有服务都卸载完成
     echo 彻底删除授权记录
@@ -1195,7 +1217,7 @@ then
         kill -9 $(ps -ef | grep xray | grep -v grep | awk '{print $1}') >/dev/null 2>&1
         kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') >/dev/null 2>&1
         pkill -f "http.server" >/dev/null 2>&1
-        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha /etc/suoha_sub_port /var/www/suoha_sub
+        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
     else
         systemctl stop cloudflared.service
         systemctl stop xray.service
@@ -1204,7 +1226,7 @@ then
         kill -9 $(ps -ef | grep xray | grep -v grep | awk '{print $2}') >/dev/null 2>&1
         kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $2}') >/dev/null 2>&1
         pkill -f "http.server" >/dev/null 2>&1
-        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /var/www/suoha_sub
+        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
         systemctl --system daemon-reload
     fi
     clear

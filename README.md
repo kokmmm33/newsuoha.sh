@@ -31,9 +31,9 @@
 * 纯粹聚焦 **443 TLS** 标准节点，移除 80 端口明文节点，保障链路加密与 CDN 握手稳定性。
 
 
-* **永久固定订阅端口（免重复导入）**：
-* 首次运行自动分配并持久化记录订阅端口（存储于 `/etc/suoha_sub_port`）；
-* 静态订阅文件集中托管于 `/var/www/suoha_sub/`，重新梭哈或重启服务器后，**客户端无需重新导入链接，直接点击“更新订阅”即可自动刷新最新节点**。
+* **永久固定订阅端口与安全路径（免重复导入）**：
+* 首次运行自动分配并持久化记录订阅端口（存储于 `/etc/suoha_sub_port`）与随机安全路径 UUID（存储于 `/etc/suoha_sub_uuid`）；
+* 静态订阅文件集中托管于 `/var/www/suoha_sub/<UUID>/`（并内置空 `index.html` 屏蔽目录遍历防扫描泄露），重新梭哈或重启服务器后，**客户端无需重新导入链接，直接点击“更新订阅”即可自动刷新最新节点**。
 
 
 
@@ -103,21 +103,21 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/a6216abcd/newsuoha.sh/ref
 
 | 导入目标 | 说明 | 示例格式 / 路径 |
 | --- | --- | --- |
-| **通用订阅 (v2rayN / NekoBox / Shadowrocket)** | 复制输出的通用订阅 URL 直接粘贴添加订阅 | `http://<VPS_IP>:<固定端口>/sub.txt` |
-| **应用协议快速导入** | 复制并导入 `sub://` 深度链接快速调起客户端 | `sub://http://<VPS_IP>:<固定端口>/sub.txt` |
-| **Clash / Mihomo 一键配置** | 点击或导入配置链接直接拉取代理策略组 | `clash://install-config?url=http://<VPS_IP>:<固定端口>/clash.yaml` |
-| **Clash 原始配置文件直链** | 浏览器直接下载或作为远程配置链接输入 | `http://<VPS_IP>:<固定端口>/clash.yaml` |
+| **通用订阅 (v2rayN / NekoBox / Shadowrocket)** | 复制输出的通用订阅 URL 直接粘贴添加订阅 | `http://<VPS_IP>:<固定端口>/<随机UUID>/sub.txt` |
+| **应用协议快速导入** | 复制并导入 `sub://` 深度链接快速调起客户端 | `sub://http://<VPS_IP>:<固定端口>/<随机UUID>/sub.txt` |
+| **Clash / Mihomo 一键配置** | 点击或导入配置链接直接拉取代理策略组 | `clash://install-config?url=http://<VPS_IP>:<固定端口>/<随机UUID>/clash.yaml` |
+| **Clash 原始配置文件直链** | 浏览器直接下载或作为远程配置链接输入 | `http://<VPS_IP>:<固定端口>/<随机UUID>/clash.yaml` |
 | **单节点手动导入** | 支持独立复制导入 | `vless://...`、`trojan://...`、`ss://...` |
 
 ### 本地持久化文件结构
 
-* **持久订阅目录**：`/var/www/suoha_sub/`
+* **持久订阅目录**：`/var/www/suoha_sub/<随机UUID>/`
 * `nodes.txt`：当前所有可用节点的明文连接串
 * `sub.txt`：Base64 编码的通用客户端订阅源
 * `clash.yaml`：适用于 Clash/Mihomo 的完整策略组配置文件
 
 
-* **固定订阅端口记录**：`/etc/suoha_sub_port`
+* **固定订阅端口与安全路径记录**：`/etc/suoha_sub_port`、`/etc/suoha_sub_uuid`
 * **运行主目录**：
 * 梭哈模式：`/opt/suoha_quick/`
 * 安装服务模式：`/opt/suoha/`
