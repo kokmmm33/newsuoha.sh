@@ -362,7 +362,7 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 	fmt.Printf("通用订阅直链   : %s/%s/sub.txt\n", baseURL, cfg.SubUUID)
 	fmt.Printf("Clash 配置直链 : %s/%s/clash.yaml\n", baseURL, cfg.SubUUID)
 	fmt.Printf("客户端 Token   : %s\n", cfg.ClientToken)
-	fmt.Printf("优选客户端命令 : ./suoha-client -server \"%s\" -token \"%s\"\n", baseURL, cfg.ClientToken)
+	fmt.Printf("一键优选测速   : sh -c \"$(curl -fsSL '%s/api/client.sh?token=%s&once=1')\"\n", baseURL, cfg.ClientToken)
 	fmt.Println("==========================================================")
 }
 

@@ -326,8 +326,45 @@ func TestServerAuthClientAPIAndArgoGuard(t *testing.T) {
 	if ovData["ok"] != true {
 		t.Errorf("expected ok=true in overview payload")
 	}
+	helperMap, _ := ovData["client_helper"].(map[string]any)
+	if helperMap == nil || !strings.Contains(fmt.Sprint(helperMap["auto_unix_once"]), "/api/client.sh") {
+		t.Errorf("expected auto_unix_once in overview client_helper, got %+v", helperMap)
+	}
 
-	// 6. When AllowArgoPanel is disabled, loopback requests bearing Cf-Connecting-Ip get 404 on /, while subscription URLs still return 200!
+	// 6. Client bootstrap scripts (/api/client.sh & /api/client.ps1) enforce token auth and emit exact Release asset logic
+	unauthSh, _ := http.Get(ts.URL + "/api/client.sh")
+	unauthSh.Body.Close()
+	if unauthSh.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 on /api/client.sh without token, got %d", unauthSh.StatusCode)
+	}
+
+	shRes, err := http.Get(fmt.Sprintf("%s/api/client.sh?token=%s&once=1", ts.URL, cfg.ClientToken))
+	if err != nil || shRes.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/client.sh with token failed: status=%v err=%v", shRes.StatusCode, err)
+	}
+	shBody, _ := io.ReadAll(shRes.Body)
+	shRes.Body.Close()
+	shText := string(shBody)
+	for _, needle := range []string{`ASSET="suoha-client-${GOOS}-${GOARCH}"`, `chmod +x "$BIN_PATH"`, `xattr -cr`, `-once`} {
+		if !strings.Contains(shText, needle) {
+			t.Errorf("expected /api/client.sh output to contain %q", needle)
+		}
+	}
+
+	psRes, err := http.Get(fmt.Sprintf("%s/api/client.ps1?token=%s&once=1", ts.URL, cfg.ClientToken))
+	if err != nil || psRes.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/client.ps1 with token failed: status=%v err=%v", psRes.StatusCode, err)
+	}
+	psBody, _ := io.ReadAll(psRes.Body)
+	psRes.Body.Close()
+	psText := string(psBody)
+	for _, needle := range []string{`suoha-client-windows-$Arch.exe`, `Unblock-File`, `"-once"`} {
+		if !strings.Contains(psText, needle) {
+			t.Errorf("expected /api/client.ps1 output to contain %q", needle)
+		}
+	}
+
+	// 7. When AllowArgoPanel is disabled, loopback requests bearing Cf-Connecting-Ip get 404 on /, while subscription & client.sh URLs still return 200!
 	_, _ = store.UpdateConfig(func(d *config.PanelConfig) error {
 		d.AllowArgoPanel = false
 		return nil
@@ -346,5 +383,13 @@ func TestServerAuthClientAPIAndArgoGuard(t *testing.T) {
 	cfSubRes.Body.Close()
 	if cfSubRes.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 on subscription via Argo even when AllowArgoPanel=false, got %d", cfSubRes.StatusCode)
+	}
+
+	cfBootstrapReq, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/client.sh?token=%s", ts.URL, cfg.ClientToken), nil)
+	cfBootstrapReq.Header.Set("Cf-Connecting-Ip", "203.0.113.9")
+	cfBootstrapRes, _ := http.DefaultClient.Do(cfBootstrapReq)
+	cfBootstrapRes.Body.Close()
+	if cfBootstrapRes.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 on /api/client.sh via Argo even when AllowArgoPanel=false, got %d", cfBootstrapRes.StatusCode)
 	}
 }

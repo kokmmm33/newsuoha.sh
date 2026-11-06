@@ -451,7 +451,7 @@
         <div class="card-header">
           <div>
             <h2 class="card-title">本地优选测速助手 (suoha-client) 联动</h2>
-            <p class="card-desc">在本地电脑或软路由运行客户端测速，结果将自动上传至此面板并置顶更新订阅。</p>
+            <p class="card-desc">支持终端一行命令全自动拉取赋权并测速上传，也可下载对应平台 Release 客户端本地运行。</p>
           </div>
           <div class="card-actions">
             <button id="btn-rotate-client-token" type="button" class="btn btn-danger btn-sm">重置客户端 Token</button>
@@ -472,26 +472,54 @@
 
           <div class="kv-item">
             <div class="kv-meta">
-              <div class="kv-label">Linux / macOS / OpenWrt 后台常驻定时测速命令</div>
-              <div id="cmd-client-linux" class="kv-value mono">-</div>
+              <div class="kv-label">本地运行设备系统与芯片架构（已自动识别，切换后下方命令与下载文件名自动同步）</div>
+              <div class="kv-value" style="font-size:12px;color:var(--text-secondary);">macOS / Linux 命令已内置 <code>chmod +x</code> 赋权与 macOS Gatekeeper 隔离属性清理，同时自动兼容当前目录与 <code>~/Downloads</code> 下载目录。</div>
             </div>
-            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-linux">复制命令</button>
+            <div class="card-actions">
+              <select id="client-platform-select" style="width:auto;min-width:250px;">
+                <option value="darwin-arm64">macOS Apple Silicon (M1/M2/M3/M4)</option>
+                <option value="darwin-amd64">macOS Intel (x86_64)</option>
+                <option value="windows-amd64">Windows 64位 (amd64)</option>
+                <option value="windows-arm64">Windows ARM64</option>
+                <option value="linux-amd64">Linux x86_64 (amd64)</option>
+                <option value="linux-arm64">Linux ARM64 (aarch64)</option>
+                <option value="linux-armv7">Linux ARMv7 (软路由/树莓派)</option>
+                <option value="linux-386">Linux 32位 (386)</option>
+              </select>
+              <a id="btn-download-client-bin" href="https://github.com/kokmmm33/newsuoha.sh/releases/tag/latest" target="_blank" rel="noopener" class="btn btn-primary btn-sm">下载对应客户端</a>
+            </div>
           </div>
 
           <div class="kv-item">
             <div class="kv-meta">
-              <div class="kv-label">Windows 定时测速命令 (CMD / PowerShell)</div>
-              <div id="cmd-client-win" class="kv-value mono">-</div>
+              <div class="kv-label"><span class="badge-tag">推荐 · 免手动下载</span> 一键自动识别芯片、拉取客户端、修复权限并立即测速上传 (-once)</div>
+              <div id="cmd-auto-once" class="kv-value mono">-</div>
             </div>
-            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-win">复制命令</button>
+            <button type="button" class="btn btn-primary btn-sm" data-copy-target="cmd-auto-once">复制命令</button>
           </div>
 
           <div class="kv-item">
             <div class="kv-meta">
-              <div class="kv-label">单次立即测速并上传 (-once)</div>
-              <div id="cmd-client-once" class="kv-value mono">-</div>
+              <div class="kv-label"><span class="badge-tag">推荐 · 后台定时</span> 一键自动拉取并常驻定时测速上传（默认每 6 小时）</div>
+              <div id="cmd-auto-daemon" class="kv-value mono">-</div>
             </div>
-            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-once">复制命令</button>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-auto-daemon">复制命令</button>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">已手动下载 Release 文件 · 单次立即测速并上传（文件名精确匹配 + 自动修复执行权限）</div>
+              <div id="cmd-manual-once" class="kv-value mono">-</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-manual-once">复制命令</button>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">已手动下载 Release 文件 · 常驻定时测速上传（文件名精确匹配 + 自动修复执行权限）</div>
+              <div id="cmd-manual-daemon" class="kv-value mono">-</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-manual-daemon">复制命令</button>
           </div>
         </div>
       </article>

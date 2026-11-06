@@ -340,6 +340,9 @@ func ensureCfstBinary(cfg *Config, absDir string) (string, error) {
 	for _, name := range candidates {
 		p := filepath.Join(absDir, name)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			if runtime.GOOS != "windows" {
+				_ = os.Chmod(p, 0755)
+			}
 			return p, nil
 		}
 	}
@@ -377,11 +380,11 @@ func downloadAndExtractCfst(destDir string) error {
 	}
 
 	ext := "tar.gz"
-	if osName == "windows" {
+	if osName == "windows" || osName == "darwin" {
 		ext = "zip"
 	}
 
-	fileName := fmt.Sprintf("CloudflareSpeedTest_%s_%s.%s", osName, archName, ext)
+	fileName := fmt.Sprintf("cfst_%s_%s.%s", osName, archName, ext)
 	baseURL := "https://github.com/XIU2/CloudflareSpeedTest/releases/latest/download/" + fileName
 	downloadURLs := []string{
 		baseURL,
@@ -389,9 +392,8 @@ func downloadAndExtractCfst(destDir string) error {
 		"https://ghproxy.net/" + baseURL,
 	}
 
-	var archiveData []byte
 	var lastErr error
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 
 	for _, u := range downloadURLs {
 		log.Printf("[下载] 尝试拉取: %s", u)
@@ -400,7 +402,7 @@ func downloadAndExtractCfst(destDir string) error {
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", "suoha-client/1.0")
+		req.Header.Set("User-Agent", "suoha-client/1.1")
 		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
@@ -411,23 +413,25 @@ func downloadAndExtractCfst(destDir string) error {
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			continue
 		}
-		archiveData, err = io.ReadAll(resp.Body)
+		archiveData, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if err != nil || len(archiveData) < 1024 {
+		if err != nil || len(archiveData) < 10240 {
 			lastErr = fmt.Errorf("下载内容不完整 (%v)", err)
 			continue
 		}
-		break
+		if ext == "zip" {
+			err = extractZip(archiveData, destDir)
+		} else {
+			err = extractTarGz(archiveData, destDir)
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("解压校验失败 (%v)", err)
+			continue
+		}
+		return nil
 	}
 
-	if len(archiveData) == 0 {
-		return fmt.Errorf("下载 %s 失败: %v", fileName, lastErr)
-	}
-
-	if ext == "zip" {
-		return extractZip(archiveData, destDir)
-	}
-	return extractTarGz(archiveData, destDir)
+	return fmt.Errorf("下载 %s 失败: %v", fileName, lastErr)
 }
 
 func extractZip(data []byte, destDir string) error {

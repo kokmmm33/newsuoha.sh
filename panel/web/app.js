@@ -1,11 +1,39 @@
 (function () {
   "use strict";
 
+  function detectInitialClientPlatform() {
+    const ua = navigator.userAgent || "";
+    if (/Windows/i.test(ua)) {
+      return /ARM64|aarch64/i.test(ua) ? "windows-arm64" : "windows-amd64";
+    }
+    if (/Macintosh|Mac OS X/i.test(ua)) {
+      // Safari & Chrome freeze Mac UA to "Intel Mac OS X"; inspect WebGL GPU vendor to distinguish Intel vs Apple Silicon
+      try {
+        const canvas = document.createElement("canvas");
+        const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+        if (gl) {
+          const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+          const renderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "") : "";
+          if (/Intel|AMD|Radeon/i.test(renderer) && !/Apple/i.test(renderer)) {
+            return "darwin-amd64";
+          }
+        }
+      } catch (_) {}
+      return "darwin-arm64";
+    }
+    if (/aarch64|arm64/i.test(ua)) return "linux-arm64";
+    if (/armv7|armhf/i.test(ua)) return "linux-armv7";
+    if (/i686|i386/i.test(ua)) return "linux-386";
+    return "linux-amd64";
+  }
+
   const state = {
     authenticated: false,
     activeTab: "tunnel",
     tunnelMode: "quick",
     selectedCFPort: 443,
+    clientPlatform: detectInitialClientPlatform(),
+    clientPlatformManual: false,
     overview: null,
     prefDraft: [],
     fallbacksDraft: [],
@@ -343,6 +371,75 @@
     });
   }
 
+  function resolveClientServerURL(helper) {
+    const locHost = (window.location.hostname || "").toLowerCase();
+    const isLocalLoopback =
+      !locHost || locHost === "localhost" || locHost === "127.0.0.1" || locHost === "::1" || locHost === "[::1]";
+    if (!isLocalLoopback && window.location.origin && /^https?:\/\//i.test(window.location.origin)) {
+      return window.location.origin;
+    }
+    return helper.server_url || helper.direct_url || helper.argo_url || window.location.origin || "";
+  }
+
+  function updateClientCommandsUI() {
+    if (!state.overview) return;
+    const helper = state.overview.client_helper || {};
+    const cfgProto = (state.overview.config && state.overview.config.protocols) || {};
+    const sel = $("client-platform-select");
+    if (sel && sel.value !== state.clientPlatform) {
+      sel.value = state.clientPlatform;
+    }
+
+    const plat = state.clientPlatform || "darwin-arm64";
+    const isWin = plat.indexOf("windows-") === 0;
+    const isMac = plat.indexOf("darwin-") === 0;
+    const repo = helper.release_repo || "kokmmm33/newsuoha.sh";
+    const asset = isWin ? `suoha-client-${plat}.exe` : `suoha-client-${plat}`;
+    const token = helper.token || "";
+    const serverUrl = resolveClientServerURL(helper);
+    const tlsPort = Number(cfgProto.tls_default_port || helper.tls_port || 443);
+    const portArg = tlsPort && tlsPort !== 443 ? ` -port ${tlsPort}` : "";
+
+    const dlBtn = $("btn-download-client-bin");
+    if (dlBtn) {
+      dlBtn.href = `https://github.com/${repo}/releases/download/latest/${asset}`;
+      dlBtn.textContent = `下载 ${asset}`;
+    }
+
+    if (!token || !serverUrl) {
+      $("cmd-auto-once").textContent = "-";
+      $("cmd-auto-daemon").textContent = "-";
+      $("cmd-manual-once").textContent = "-";
+      $("cmd-manual-daemon").textContent = "-";
+      return;
+    }
+
+    if (isWin) {
+      $("cmd-auto-once").textContent =
+        `powershell -ExecutionPolicy Bypass -Command "irm '${serverUrl}/api/client.ps1?token=${token}&once=1' | iex"`;
+      $("cmd-auto-daemon").textContent =
+        `powershell -ExecutionPolicy Bypass -Command "irm '${serverUrl}/api/client.ps1?token=${token}' | iex"`;
+
+      const winBase =
+        `$b = ".\\${asset}"; if (!(Test-Path $b)) { $b = "$HOME\\Downloads\\${asset}" }; Unblock-File $b -EA 0; & $b -server "${serverUrl}" -token "${token}"${portArg}`;
+      $("cmd-manual-once").textContent = `${winBase} -once`;
+      $("cmd-manual-daemon").textContent = winBase;
+    } else {
+      $("cmd-auto-once").textContent =
+        `sh -c "$(curl -fsSL '${serverUrl}/api/client.sh?token=${token}&once=1')"`;
+      $("cmd-auto-daemon").textContent =
+        `sh -c "$(curl -fsSL '${serverUrl}/api/client.sh?token=${token}')"`;
+
+      const fixPerm = isMac
+        ? `chmod +x "$BIN" && (xattr -cr "$BIN" 2>/dev/null || true)`
+        : `chmod +x "$BIN"`;
+      const unixBase =
+        `BIN=./${asset}; [ -f "$BIN" ] || BIN="$HOME/Downloads/${asset}"; ${fixPerm} && "$BIN" -server "${serverUrl}" -token "${token}"${portArg}`;
+      $("cmd-manual-once").textContent = `${unixBase} -once`;
+      $("cmd-manual-daemon").textContent = unixBase;
+    }
+  }
+
   function renderClientHelper(data) {
     const pref = data.preferred || { ips: [] };
     const helper = data.client_helper || {};
@@ -353,9 +450,7 @@
       : "暂未上传动态优选 IP（当前使用默认隧道域名与保底公共优选域名）";
 
     $("val-client-token").textContent = helper.token || "-";
-    $("cmd-client-linux").textContent = helper.linux_daemon || "-";
-    $("cmd-client-win").textContent = helper.win_daemon || "-";
-    $("cmd-client-once").textContent = helper.linux_once || "-";
+    updateClientCommandsUI();
   }
 
   // ==================== Preferred IP & Fallback Tables ====================
@@ -777,6 +872,32 @@
     });
 
     // Preferred IPs & suoha-client Actions
+    $("client-platform-select").value = state.clientPlatform;
+    $("client-platform-select").addEventListener("change", (e) => {
+      state.clientPlatform = e.target.value;
+      state.clientPlatformManual = true;
+      updateClientCommandsUI();
+    });
+
+    if (navigator.userAgentData && typeof navigator.userAgentData.getHighEntropyValues === "function") {
+      navigator.userAgentData
+        .getHighEntropyValues(["architecture", "platform"])
+        .then((info) => {
+          if (state.clientPlatformManual) return;
+          const plat = String(info.platform || "").toLowerCase();
+          const arch = String(info.architecture || "").toLowerCase();
+          if (plat.includes("mac")) {
+            state.clientPlatform = arch.includes("x86") ? "darwin-amd64" : "darwin-arm64";
+          } else if (plat.includes("win")) {
+            state.clientPlatform = arch.includes("arm") ? "windows-arm64" : "windows-amd64";
+          } else if (plat.includes("linux")) {
+            state.clientPlatform = arch.includes("arm") ? "linux-arm64" : "linux-amd64";
+          }
+          updateClientCommandsUI();
+        })
+        .catch(() => {});
+    }
+
     $("btn-rotate-client-token").addEventListener("click", async () => {
       if (!window.confirm("重置后正在运行的 suoha-client 需更新 -token 参数。确定重置吗？")) return;
       try {

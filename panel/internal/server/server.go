@@ -78,9 +78,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. suoha-client APIs (/api/preferred_ips and /api/update_ips)
+	// 4. suoha-client APIs (/api/preferred_ips, /api/update_ips, /api/client.sh, /api/client.ps1)
 	if reqPath == "/api/preferred_ips" && r.Method == http.MethodGet {
 		h.handleGetPreferredIPs(w, r, cfg)
+		return
+	}
+	if reqPath == "/api/client.sh" && r.Method == http.MethodGet {
+		h.handleClientBootstrapSH(w, r, cfg)
+		return
+	}
+	if reqPath == "/api/client.ps1" && r.Method == http.MethodGet {
+		h.handleClientBootstrapPS1(w, r, cfg)
 		return
 	}
 	if strings.HasSuffix(reqPath, "/api/update_ips") && r.Method == http.MethodPost {
@@ -370,9 +378,13 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	rt := h.mgr.RuntimeState()
 	bundle := subgen.Generate(cfg, pref, rt)
 
-	// Determine recommended server URL for suoha-client
+	// Determine recommended server URL for suoha-client:
+	// Prefer permanent endpoints (Fixed Token custom domain HTTPS, or Direct HTTP IP:Port)
+	// so daemon clients survive Quick Tunnel rotations; fall back to Quick Tunnel HTTPS on NAT hosts.
 	clientServer := bundle.DirectBaseURL
-	if bundle.ArgoBaseURL != "" {
+	if cfg.Tunnel.Mode == "token" && bundle.ArgoBaseURL != "" {
+		clientServer = bundle.ArgoBaseURL
+	} else if rt.ServerIP == "" && bundle.ArgoBaseURL != "" {
 		clientServer = bundle.ArgoBaseURL
 	}
 
@@ -381,20 +393,23 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	cfgSafe.AdminPassHash = ""
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"config":       cfgSafe,
-		"status":       st,
-		"preferred":    pref,
-		"subscription": bundle,
+		"ok":            true,
+		"config":        cfgSafe,
+		"status":        st,
+		"preferred":     pref,
+		"subscription":  bundle,
 		"local_gateway": fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort),
 		"client_helper": map[string]string{
-			"server_url":   clientServer,
-			"direct_url":   bundle.DirectBaseURL,
-			"argo_url":     bundle.ArgoBaseURL,
-			"token":        cfg.ClientToken,
-			"linux_daemon": fmt.Sprintf(`./suoha-client -server "%s" -token "%s"`, clientServer, cfg.ClientToken),
-			"linux_once":   fmt.Sprintf(`./suoha-client -server "%s" -token "%s" -once`, clientServer, cfg.ClientToken),
-			"win_daemon":   fmt.Sprintf(`suoha-client.exe -server "%s" -token "%s"`, clientServer, cfg.ClientToken),
+			"release_repo":     defaultReleaseRepo,
+			"server_url":       clientServer,
+			"direct_url":       bundle.DirectBaseURL,
+			"argo_url":         bundle.ArgoBaseURL,
+			"token":            cfg.ClientToken,
+			"tls_port":         fmt.Sprintf("%d", cfg.Protocols.TLSDefaultPort),
+			"auto_unix_once":   fmt.Sprintf(`sh -c "$(curl -fsSL '%s/api/client.sh?token=%s&once=1')"`, clientServer, cfg.ClientToken),
+			"auto_unix_daemon": fmt.Sprintf(`sh -c "$(curl -fsSL '%s/api/client.sh?token=%s')"`, clientServer, cfg.ClientToken),
+			"auto_win_once":    fmt.Sprintf(`powershell -ExecutionPolicy Bypass -Command "irm '%s/api/client.ps1?token=%s&once=1' | iex"`, clientServer, cfg.ClientToken),
+			"auto_win_daemon":  fmt.Sprintf(`powershell -ExecutionPolicy Bypass -Command "irm '%s/api/client.ps1?token=%s' | iex"`, clientServer, cfg.ClientToken),
 		},
 	})
 }

@@ -367,9 +367,9 @@ Argo 免端口 HTTPS Clash 配置:
 	}
 	summary += fmt.Sprintf(`
 ======================== 本地优选客户端 (suoha-client) ========================
-Linux / macOS 定时测速: ./suoha-client -server "%s" -token "%s"
-Windows 定时测速     : suoha-client.exe -server "%s" -token "%s"
-单次立即测速         : ./suoha-client -server "%s" -token "%s" -once
+Mac/Linux 一键立即测速 : sh -c "$(curl -fsSL '%s/api/client.sh?token=%s&once=1')"
+Mac/Linux 后台定时测速 : sh -c "$(curl -fsSL '%s/api/client.sh?token=%s')"
+Windows 一键立即测速   : powershell -ExecutionPolicy Bypass -Command "irm '%s/api/client.ps1?token=%s&once=1' | iex"
 ==========================================================================
 `, uploadTarget, cfg.ClientToken, uploadTarget, cfg.ClientToken, uploadTarget, cfg.ClientToken)
 

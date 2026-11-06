@@ -90,19 +90,40 @@ suoha uninstall      # 彻底卸载服务并清理全部配置与订阅数据
 
 为了解决不同地区与运营商（电信/联通/移动）下公共优选域名延迟波动的问题，仓库提供了跨平台客户端 **`suoha-client`**（源码位于 [`client/`](client/)，支持 Windows / macOS / Linux / OpenWrt）。
 
-### 快速使用
+### 方式一：免手动下载 · 终端一键全自动拉取运行（推荐）
 
-前往 GitHub Releases 下载对应系统的 `suoha-client`，在 Web 面板的【优选 IP 管理】页面直接一键复制专属启动命令即可运行：
+直接打开 Web 面板的 **【优选 IP 管理】** 页面复制专属一键命令——脚本会自动识别当前电脑芯片架构（如 Apple Silicon M 系列、Intel、Linux ARM/x86、Windows）、拉取匹配的 Release 客户端、自动处理 `chmod +x` 执行权限与 macOS 隔离属性并立即开始测速上传：
 
 ```bash
-# Linux / macOS / OpenWrt 后台定时运行（默认每 6 小时测速并上传 Top 5 优选 IP）
-./suoha-client -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>"
+# macOS / Linux / OpenWrt 单次立即测速上传（去掉 &once=1 即为每 6 小时常驻定时测速）
+sh -c "$(curl -fsSL 'http://<VPS_IP>:<固定端口>/api/client.sh?token=<专属Token>&once=1')"
+```
 
-# Windows (CMD / PowerShell)
-suoha-client.exe -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>"
+```powershell
+# Windows PowerShell 单次立即测速上传
+powershell -ExecutionPolicy Bypass -Command "irm 'http://<VPS_IP>:<固定端口>/api/client.ps1?token=<专属Token>&once=1' | iex"
+```
 
-# 单次立即测速并上传后退出（适合配合 crontab 或计划任务）
-./suoha-client -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>" -once
+### 方式二：手动从 Releases 下载对应平台客户端执行
+
+前往 [GitHub Releases (`latest`)](https://github.com/kokmmm33/newsuoha.sh/releases/tag/latest) 下载与你设备匹配的可执行文件（或在面板【优选 IP 管理】中选择对应平台后直接复制命令）：
+
+* **macOS Apple Silicon (M1/M2/M3/M4)**：`suoha-client-darwin-arm64`
+* **macOS Intel (x86_64)**：`suoha-client-darwin-amd64`
+* **Windows 64 位 / ARM64**：`suoha-client-windows-amd64.exe` / `suoha-client-windows-arm64.exe`
+* **Linux / 软路由**：`suoha-client-linux-amd64` / `suoha-client-linux-arm64` / `suoha-client-linux-armv7` / `suoha-client-linux-386`
+
+```bash
+# macOS (M 系列芯片示例：赋执行权限 + 清除 Gatekeeper 拦截 + 运行)
+chmod +x ./suoha-client-darwin-arm64 && xattr -cr ./suoha-client-darwin-arm64 2>/dev/null
+./suoha-client-darwin-arm64 -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>" -once
+
+# Linux / OpenWrt (x86_64 示例：赋执行权限 + 后台定时运行)
+chmod +x ./suoha-client-linux-amd64 && ./suoha-client-linux-amd64 -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>"
+
+# Windows PowerShell (64 位示例)
+Unblock-File .\suoha-client-windows-amd64.exe -ErrorAction SilentlyContinue
+.\suoha-client-windows-amd64.exe -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>" -once
 ```
 
 > 若服务端开启了单隧道梭哈或固定域名隧道，`-server` 也可直接填写 `https://<Argo隧道域名>`，无需 VPS 开放任何入站端口即可上报优选 IP。
