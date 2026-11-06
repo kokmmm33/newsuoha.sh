@@ -166,15 +166,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO="${{ github.repository }}"
           TAG_NAME="${GITHUB_REF_NAME}"
           if [[ "$TAG_NAME" != v* ]]; then
             TAG_NAME="latest"
           fi
 
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" artifacts/* --clobber
+          if gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" artifacts/* --repo "$REPO" --clobber
           else
             gh release create "$TAG_NAME" artifacts/* \
+              --repo "$REPO" \
+              --target "${{ github.sha }}" \
               --title "New-Suoha Web Panel & Preferred IP Client ($TAG_NAME)" \
               --notes "Multi-arch static binaries for suoha-panel (Linux Web Control Panel) and suoha-client (Cross-platform Preferred IP Speedtest Uploader)."
           fi
