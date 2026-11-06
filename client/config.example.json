@@ -1,0 +1,16 @@
+{
+  "server": "http://127.0.0.1:28000",
+  "token": "your_sub_token_here",
+  "interval": "6h",
+  "once": false,
+  "top": 5,
+  "port": 443,
+  "dd": false,
+  "ipv6": false,
+  "url": "",
+  "tl": 300,
+  "sl": 0,
+  "cfst_dir": "./cfst",
+  "cfst_bin": "",
+  "cfst_args": ""
+}

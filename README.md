@@ -112,26 +112,71 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/a6216abcd/newsuoha.sh/ref
 ### 本地持久化文件结构
 
 * **持久订阅目录**：`/var/www/suoha_sub/<随机UUID>/`
-* `nodes.txt`：当前所有可用节点的明文连接串
-* `sub.txt`：Base64 编码的通用客户端订阅源
-* `clash.yaml`：适用于 Clash/Mihomo 的完整策略组配置文件
-
-
+  * `nodes.txt`：当前所有可用节点的明文连接串
+  * `sub.txt`：Base64 编码的通用客户端订阅源
+  * `clash.yaml`：适用于 Clash/Mihomo 的完整策略组配置文件
+  * `meta.json` / `preferred_ips.json` / `sub_server.py`（位于 `/var/www/suoha_sub/`）：当前隧道配置元数据、客户端上传的动态优选 IP 列表及后台 HTTP 服务
 * **固定订阅端口与安全路径记录**：`/etc/suoha_sub_port`、`/etc/suoha_sub_uuid`
+* **固定鉴权 Token 记录**：`/etc/suoha_sub_token`
 * **运行主目录**：
-* 梭哈模式：`/opt/suoha_quick/`
-* 安装服务模式：`/opt/suoha/`
+  * 梭哈模式：`/opt/suoha_quick/`
+  * 安装服务模式：`/opt/suoha/`
 
+---
 
+## 客户端本地优选 IP 自动测速与上传 (`suoha-client`)
+
+为了解决不同地区、不同宽带运营商（电信/联通/移动）下公共优选域名延迟不稳定的问题，本项目提供了跨平台的本地后台优选助手 **`suoha-client`**（源码位于 [`client/`](client/)，支持 Windows / macOS / Linux / OpenWrt 软路由）。
+
+### 工作流程
+
+1. **自动准备测速环境**：首次运行若本地无 `CloudflareSpeedTest` 或 IP 段文件（`ip.txt` / `ipv6.txt`），程序会根据当前系统与架构自动下载解压。
+2. **强制物理直连测速**：调用 `CloudflareSpeedTest` 子进程时自动剥离本地 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量，确保测得真实的本地直连延迟与下载速度。
+3. **自动上传并刷新服务端订阅**：筛选出最优的 Top N（默认 5 个）IP，附带机房/延迟/速度标签（如 `优选1-HKG-38ms-21.5MB`）通过 `POST /api/update_ips` 上传至服务端。
+4. **服务端无感热更新**：服务端收到优选列表后，立即将动态优选 IP 置顶合并（同时保留默认 Argo 域名、内置公共优选域名作为保底，以及共存的 IPv6 SS 节点），自动重生成 `sub.txt` 与 `clash.yaml`。
+
+### 快速使用
+
+服务端部署完成后，终端（或 `v2ray.txt`）会直接输出专属的启动命令：
+
+```bash
+# Linux / macOS / OpenWrt 后台定时运行（默认每 6 小时自动测速并上传 Top 5 优选 IP）
+./suoha-client -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>"
+
+# Windows (CMD / PowerShell)
+suoha-client.exe -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>"
+
+# 单次立即测速并上传后退出（适合配合 crontab 或计划任务）
+./suoha-client -server "http://<VPS_IP>:<固定端口>" -token "<专属Token>" -once
+```
+
+### 常用参数说明
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-server` | 环境变量 `SUOHA_SERVER` | 服务端订阅地址，如 `http://1.2.3.4:28000` |
+| `-token` | 环境变量 `SUOHA_TOKEN` | 服务端 `/etc/suoha_sub_token` 中的鉴权 Token |
+| `-interval` | `6h` | 后台循环测速间隔（如 `6h`、`2h`、`30m`） |
+| `-once` | `false` | 单次运行模式，完成一次测速与上传后立即退出 |
+| `-top` | `5` | 每次挑选并上传的最优 IP 数量 |
+| `-port` | `443` | 优选节点使用的 Cloudflare TLS 端口（如 `443`、`2053`、`2083`、`8443`） |
+| `-dd` | `false` | 禁用下载测速，仅按延迟筛选优选 IP（速度快、省流量） |
+| `-ipv6` | `false` | 使用 IPv6 地址段（`ipv6.txt`）进行测速优选 |
+| `-tl` | `300` | 平均延迟上限（ms） |
+| `-sl` | `0` | 下载速度下限（MB/s，默认不限制） |
+| `-url` | 空 | 自定义 `CloudflareSpeedTest` 下载测速地址 |
+| `-cfst-dir` | `./cfst` | `CloudflareSpeedTest` 及 IP 段文件存放目录 |
+| `-cfst-args` | 空 | 额外透传给 `CloudflareSpeedTest` 的原始命令行参数 |
+| `-config` | `./config.json` | JSON 配置文件路径（参考 [`client/config.example.json`](client/config.example.json)） |
 
 ---
 
 ## 卸载与清理
 
 * 运行脚本选择 `3. 卸载服务`，脚本将自动：
-* 停止并清理 Xray、cloudflared 及后台内置 HTTP 订阅服务进程；
-* 移除 systemd 单元文件（或 Alpine OpenRC 脚本）；
-* 清理 `/opt/suoha`、`/opt/suoha_quick`、`/var/www/suoha_sub` 及全局命令软链接 `suoha`。
+  * 停止并清理 Xray、cloudflared 及后台内置 HTTP 订阅服务进程；
+  * 移除 systemd 单元文件（或 Alpine OpenRC 脚本）；
+  * 清理 `/opt/suoha`、`/opt/suoha_quick`、`/var/www/suoha_sub`、`/etc/suoha_sub_port`、`/etc/suoha_sub_token` 及全局命令软链接 `suoha`。
 
 
 

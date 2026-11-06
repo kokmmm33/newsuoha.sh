@@ -102,15 +102,606 @@ function get_or_create_sub_uuid(){
     echo "$sub_uuid"
 }
 
+function get_or_create_sub_token(){
+    local token_file="/etc/suoha_sub_token"
+    local token=""
+    if [ -f "$token_file" ]; then
+        token=$(cat "$token_file" | tr -d '\n\r ')
+    fi
+    if [ -z "$token" ]; then
+        token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | head -c 16)
+        if [ -z "$token" ]; then
+            token="${RANDOM}${RANDOM}${RANDOM}"
+        fi
+        echo "$token" > "$token_file"
+        chmod 600 "$token_file" 2>/dev/null
+    fi
+    echo "$token"
+}
+
+function ensure_sub_server_script(){
+    local static_dir="/var/www/suoha_sub"
+    mkdir -p "$static_dir" >/dev/null 2>&1
+    cat > "${static_dir}/sub_server.py" << 'PYEOF'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import base64
+import datetime
+import http.server
+import json
+import os
+import re
+import shutil
+import socket
+import socketserver
+import sys
+import threading
+import urllib.parse
+
+STATIC_DIR = "/var/www/suoha_sub"
+META_FILE = os.path.join(STATIC_DIR, "meta.json")
+PREF_FILE = os.path.join(STATIC_DIR, "preferred_ips.json")
+TOKEN_FILE = "/etc/suoha_sub_token"
+SUB_UUID_FILE = "/etc/suoha_sub_uuid"
+
+REGEN_LOCK = threading.Lock()
+
+
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
+
+
+def atomic_write(path, content):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp_path, path)
+
+
+def get_expected_token(meta):
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+                tok = f.read().strip()
+                if tok:
+                    return tok
+    except Exception:
+        pass
+    return str(meta.get("sub_token", "")).strip()
+
+
+def get_sub_uuid(meta):
+    try:
+        if os.path.exists(SUB_UUID_FILE):
+            with open(SUB_UUID_FILE, "r", encoding="utf-8") as f:
+                u = f.read().strip()
+                if u:
+                    return u
+    except Exception:
+        pass
+    return str(meta.get("sub_uuid", "")).strip()
+
+
+def sanitize_label(text):
+    text = re.sub(r"[\r\n\t#\"'\\]+", "", str(text or "")).strip()
+    text = re.sub(r"\s+", "_", text)
+    return text
+
+
+def format_host_for_url(host):
+    host = str(host or "").strip()
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def build_ip_label(idx, entry):
+    raw_label = sanitize_label(entry.get("label", ""))
+    if raw_label:
+        return raw_label
+    parts = [f"优选{idx}"]
+    colo = sanitize_label(entry.get("colo", ""))
+    latency = sanitize_label(entry.get("latency", ""))
+    speed = sanitize_label(entry.get("speed", ""))
+    if colo:
+        parts.append(colo)
+    if latency:
+        parts.append(latency)
+    if speed:
+        parts.append(speed.replace("/s", ""))
+    return "-".join(parts)
+
+
+def regenerate_all():
+    with REGEN_LOCK:
+        meta = load_json(META_FILE, {})
+        if not meta or not meta.get("uuid"):
+            return False
+
+        pref_data = load_json(PREF_FILE, {"updated_at": "", "ips": []})
+        pref_ips = pref_data.get("ips", [])
+        if not isinstance(pref_ips, list):
+            pref_ips = []
+
+        uuid = meta["uuid"]
+        argo_vl = meta.get("argo_vl", "")
+        argo_tr = meta.get("argo_tr", "") or argo_vl
+        urlpath_vless = meta.get("urlpath_vless", "")
+        urlpath_trojan = meta.get("urlpath_trojan", "")
+        node_tag = meta.get("node_tag", "Argo_Node") or "Argo_Node"
+        default_label = meta.get("default_label", "默认Argo") or "默认Argo"
+        work_dir = meta.get("work_dir", "")
+        server_ip = meta.get("server_ip", "") or argo_vl
+        sub_port = meta.get("sub_port", 25000)
+        sub_uuid = get_sub_uuid(meta)
+        sub_token = get_expected_token(meta)
+
+        dynamic_targets = []
+        seen_names = set()
+        for idx, item in enumerate(pref_ips, 1):
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip", "")).strip()
+            if not ip:
+                continue
+            try:
+                port = int(item.get("port", 443) or 443)
+            except Exception:
+                port = 443
+            if port < 1 or port > 65535:
+                port = 443
+            label = build_ip_label(idx, item)
+            if label in seen_names:
+                label = f"{label}-{idx}"
+            seen_names.add(label)
+            dynamic_targets.append((ip, port, label))
+
+        fallback_opt = [
+            ("cf.090227.xyz", 443, "优选cf.090227"),
+            ("cloudflare.182682.xyz", 443, "优选182682"),
+        ]
+
+        vless_targets = list(dynamic_targets) + [(argo_vl, 443, default_label)] + fallback_opt
+        trojan_targets = list(dynamic_targets) + [(argo_tr, 443, default_label)] + fallback_opt
+
+        nodes_lines = []
+        proxy_names = []
+        clash_lines = [
+            "port: 7890",
+            "socks-port: 7891",
+            "allow-lan: false",
+            "mode: rule",
+            "log-level: info",
+            "proxies:",
+        ]
+
+        for host, port, label in vless_targets:
+            host_uri = format_host_for_url(host)
+            pname = f"{node_tag}-VLESS-{label}-{port}"
+            if pname in proxy_names:
+                pname = f"{pname}-{len(proxy_names)+1}"
+            vless_uri = (
+                f"vless://{uuid}@{host_uri}:{port}"
+                f"?encryption=none&security=tls&sni={argo_vl}"
+                f"&type=ws&host={argo_vl}&path=%2F{urlpath_vless}"
+                f"#{pname}"
+            )
+            nodes_lines.append(vless_uri)
+            proxy_names.append(pname)
+            clash_lines.extend([
+                f'  - name: "{pname}"',
+                "    type: vless",
+                f'    server: "{host}"',
+                f"    port: {port}",
+                f"    uuid: {uuid}",
+                "    cipher: auto",
+                "    tls: true",
+                "    udp: true",
+                f"    servername: {argo_vl}",
+                "    network: ws",
+                "    ws-opts:",
+                f"      path: /{urlpath_vless}",
+                "      headers:",
+                f"        Host: {argo_vl}",
+            ])
+
+        for host, port, label in trojan_targets:
+            host_uri = format_host_for_url(host)
+            pname = f"{node_tag}-Trojan-{label}-{port}"
+            if pname in proxy_names:
+                pname = f"{pname}-{len(proxy_names)+1}"
+            trojan_uri = (
+                f"trojan://{uuid}@{host_uri}:{port}"
+                f"?security=tls&sni={argo_tr}"
+                f"&type=ws&host={argo_tr}&path=%2F{urlpath_trojan}"
+                f"#{pname}"
+            )
+            nodes_lines.append(trojan_uri)
+            proxy_names.append(pname)
+            clash_lines.extend([
+                f'  - name: "{pname}"',
+                "    type: trojan",
+                f'    server: "{host}"',
+                f"    port: {port}",
+                f"    password: {uuid}",
+                "    udp: true",
+                f"    sni: {argo_tr}",
+                "    network: ws",
+                "    ws-opts:",
+                f"      path: /{urlpath_trojan}",
+                "      headers:",
+                f"        Host: {argo_tr}",
+            ])
+
+        ss_info = meta.get("ss")
+        if isinstance(ss_info, dict) and ss_info.get("ss_link"):
+            nodes_lines.append(ss_info["ss_link"])
+            proxy_names.append("IPv6-SS-Direct")
+            clash_lines.extend([
+                '  - name: "IPv6-SS-Direct"',
+                "    type: ss",
+                f'    server: "{ss_info.get("ipv6_addr", "")}"',
+                f'    port: {ss_info.get("ss_port", 30000)}',
+                f'    cipher: {ss_info.get("ss_method", "aes-128-gcm")}',
+                f'    password: "{ss_info.get("ss_password", "")}"',
+                "    udp: true",
+            ])
+
+        clash_lines.extend([
+            "proxy-groups:",
+            "  - name: PROXY",
+            "    type: select",
+            "    proxies:",
+        ])
+        for pname in proxy_names:
+            clash_lines.append(f'      - "{pname}"')
+        clash_lines.extend([
+            "rules:",
+            "  - MATCH,PROXY",
+            "",
+        ])
+
+        nodes_content = "\n".join(nodes_lines) + "\n"
+        sub_b64 = base64.b64encode(nodes_content.encode("utf-8")).decode("ascii")
+        clash_content = "\n".join(clash_lines)
+
+        server_host_url = format_host_for_url(server_ip)
+        base_url = f"http://{server_host_url}:{sub_port}"
+        sub_path_prefix = f"/{sub_uuid}" if sub_uuid else ""
+        sub_online_url = f"{base_url}{sub_path_prefix}/sub.txt"
+        clash_online_url = f"{base_url}{sub_path_prefix}/clash.yaml"
+        target_static_dir = os.path.join(STATIC_DIR, sub_uuid) if sub_uuid else STATIC_DIR
+
+        updated_at = pref_data.get("updated_at") or "暂未上传 (当前使用默认与公共优选域名)"
+        v2ray_content = f"""======================== 一键梭哈 443 TLS 节点列表 ========================
+{nodes_content.strip()}
+
+端口替换提示:
+443 端口可根据需要改为 CF 其它 TLS 端口: 2053, 2083, 2087, 2096, 8443
+
+======================== 动态优选 IP 状态 ========================
+当前动态优选 IP 数量: {len(dynamic_targets)} 个
+最近更新时间: {updated_at}
+优选列表记录: {PREF_FILE}
+
+======================== 客户端订阅及导入链接 ========================
+本机固定订阅服务端口: {sub_port} (已永久保存，重新部署无需重新导入客户端)
+
+1. 通用订阅链接 (支持 v2rayN / NekoBox / Shadowrocket):
+{sub_online_url}
+
+2. v2rayN / NekoBox 一键导入协议链接:
+sub://{sub_online_url}
+
+3. Clash / Clash.Meta / Mihomo 一键导入配置:
+clash://install-config?url={clash_online_url}
+
+4. Clash 在线配置文件直链:
+{clash_online_url}
+
+======================== 客户端本地优选 IP 自动上传 ========================
+服务端上传地址: {base_url}
+专属鉴权 Token: {sub_token} (已永久保存于 /etc/suoha_sub_token)
+
+客户端后台定时测速上传 (默认每 6 小时测速并上传 Top 5 优选 IP):
+  Linux / macOS : ./suoha-client -server "{base_url}" -token "{sub_token}"
+  Windows (CMD) : suoha-client.exe -server "{base_url}" -token "{sub_token}"
+
+客户端单次立即测速上传 (附加 -once 参数):
+  ./suoha-client -server "{base_url}" -token "{sub_token}" -once
+
+持久订阅存储目录: {target_static_dir}/
+=====================================================================
+"""
+
+        os.makedirs(STATIC_DIR, exist_ok=True)
+        os.makedirs(target_static_dir, exist_ok=True)
+        atomic_write(os.path.join(STATIC_DIR, "index.html"), "")
+        atomic_write(os.path.join(target_static_dir, "index.html"), "")
+        atomic_write(os.path.join(target_static_dir, "nodes.txt"), nodes_content)
+        atomic_write(os.path.join(target_static_dir, "sub.txt"), sub_b64)
+        atomic_write(os.path.join(target_static_dir, "clash.yaml"), clash_content)
+        atomic_write(os.path.join(target_static_dir, "v2ray.txt"), v2ray_content)
+
+        if work_dir and os.path.isdir(work_dir) and os.path.abspath(work_dir) != os.path.abspath(target_static_dir):
+            for fname in ("nodes.txt", "sub.txt", "clash.yaml", "v2ray.txt"):
+                try:
+                    shutil.copyfile(
+                        os.path.join(target_static_dir, fname),
+                        os.path.join(work_dir, fname),
+                    )
+                except Exception:
+                    pass
+        return True
+
+
+def is_valid_host_or_ip(val):
+    if not val or len(val) > 253:
+        return False
+    return bool(re.match(r"^[a-zA-Z0-9.:-]+$", val))
+
+
+class SubHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=STATIC_DIR, **kwargs)
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _check_auth(self):
+        meta = load_json(META_FILE, {})
+        expected_tok = get_expected_token(meta)
+        expected_uuid = get_sub_uuid(meta)
+        valid_tokens = {t for t in (expected_tok, expected_uuid) if t}
+        if not valid_tokens:
+            return False
+        auth_hdr = self.headers.get("Authorization", "").strip()
+        if auth_hdr.lower().startswith("bearer "):
+            provided = auth_hdr[7:].strip()
+            if provided in valid_tokens:
+                return True
+        api_hdr = self.headers.get("X-Api-Token", "").strip()
+        if api_hdr and api_hdr in valid_tokens:
+            return True
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if qs.get("token", [""])[0] in valid_tokens:
+            return True
+        return False
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        req_path = parsed.path
+
+        meta = load_json(META_FILE, {})
+        sub_uuid = get_sub_uuid(meta)
+        allowed_sub_paths = {}
+        if sub_uuid:
+            for fname in ("sub.txt", "clash.yaml", "nodes.txt"):
+                allowed_sub_paths[f"/{sub_uuid}/{fname}"] = os.path.join(STATIC_DIR, sub_uuid, fname)
+        else:
+            for fname in ("sub.txt", "clash.yaml", "nodes.txt"):
+                allowed_sub_paths[f"/{fname}"] = os.path.join(STATIC_DIR, fname)
+
+        if req_path in allowed_sub_paths:
+            fpath = allowed_sub_paths[req_path]
+            if not os.path.isfile(fpath):
+                regenerate_all()
+            if not os.path.isfile(fpath):
+                self._send_json(404, {"ok": False, "error": "Subscription file not found"})
+                return
+            with open(fpath, "rb") as f:
+                data = f.read()
+            ctype = "text/yaml; charset=utf-8" if req_path.endswith(".yaml") else "text/plain; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        if req_path == "/api/preferred_ips":
+            if not self._check_auth():
+                self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                return
+            pref_data = load_json(PREF_FILE, {"updated_at": "", "ips": []})
+            self._send_json(200, {"ok": True, "data": pref_data})
+            return
+
+        if req_path == "/health":
+            self._send_json(200, {"ok": True})
+            return
+
+        self._send_json(404, {"ok": False, "error": "Not found"})
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if not parsed.path.endswith("/api/update_ips"):
+            self._send_json(404, {"ok": False, "error": "Not found"})
+            return
+
+        if not self._check_auth():
+            self._send_json(401, {"ok": False, "error": "Unauthorized token"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+
+        if length <= 0 or length > 1024 * 1024:
+            self._send_json(400, {"ok": False, "error": "Invalid payload size"})
+            return
+
+        raw_body = self.rfile.read(length)
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"ok": False, "error": "Invalid JSON body"})
+            return
+
+        raw_ips = payload.get("ips") if isinstance(payload, dict) else None
+        if not isinstance(raw_ips, list):
+            self._send_json(400, {"ok": False, "error": "Field 'ips' must be a list"})
+            return
+
+        cleaned_ips = []
+        for idx, item in enumerate(raw_ips[:50], 1):
+            if isinstance(item, str):
+                ip_str = item.strip()
+                if is_valid_host_or_ip(ip_str):
+                    cleaned_ips.append({
+                        "ip": ip_str,
+                        "port": 443,
+                        "latency": "",
+                        "speed": "",
+                        "colo": "",
+                        "label": f"优选{idx}",
+                    })
+            elif isinstance(item, dict):
+                ip_str = str(item.get("ip", "")).strip()
+                if not is_valid_host_or_ip(ip_str):
+                    continue
+                try:
+                    port = int(item.get("port", 443) or 443)
+                except Exception:
+                    port = 443
+                if port < 1 or port > 65535:
+                    port = 443
+                entry = {
+                    "ip": ip_str,
+                    "port": port,
+                    "latency": sanitize_label(item.get("latency", "")),
+                    "speed": sanitize_label(item.get("speed", "")),
+                    "colo": sanitize_label(item.get("colo", "")),
+                }
+                entry["label"] = build_ip_label(len(cleaned_ips) + 1, {
+                    **entry,
+                    "label": item.get("label", ""),
+                })
+                cleaned_ips.append(entry)
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        pref_data = {
+            "updated_at": now_str,
+            "ips": cleaned_ips,
+        }
+        os.makedirs(STATIC_DIR, exist_ok=True)
+        atomic_write(PREF_FILE, json.dumps(pref_data, indent=2, ensure_ascii=False))
+        regenerated = regenerate_all()
+
+        self._send_json(200, {
+            "ok": True,
+            "count": len(cleaned_ips),
+            "updated_at": now_str,
+            "regenerated": regenerated,
+        })
+
+
+class DualStackServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def run_server(port):
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    regenerate_all()
+    try:
+        class IPv6DualStackServer(DualStackServer):
+            address_family = socket.AF_INET6
+
+            def server_bind(self):
+                try:
+                    self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except Exception:
+                    pass
+                super().server_bind()
+
+        httpd = IPv6DualStackServer(("::", port), SubHTTPRequestHandler)
+    except Exception:
+        httpd = DualStackServer(("0.0.0.0", port), SubHTTPRequestHandler)
+
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--regen":
+        regenerate_all()
+        sys.exit(0)
+    listen_port = int(sys.argv[1]) if len(sys.argv) >= 2 else 25000
+    run_server(listen_port)
+PYEOF
+    chmod +x "${static_dir}/sub_server.py" 2>/dev/null
+}
+
+function write_sub_meta(){
+    local mode="$1"
+    local work_dir="$2"
+    local uuid="$3"
+    local argo_vl="$4"
+    local argo_tr="$5"
+    local urlpath_vless="$6"
+    local urlpath_trojan="$7"
+    local node_tag="$8"
+    local default_label="$9"
+    local server_ip="${10}"
+    local sub_port="${11}"
+    local sub_uuid="${12}"
+    local sub_token="${13}"
+
+    ensure_sub_server_script
+    python3 -c "
+import json, os
+
+meta_file = '/var/www/suoha_sub/meta.json'
+meta = {
+    'mode': '$mode',
+    'work_dir': '$work_dir',
+    'uuid': '$uuid',
+    'argo_vl': '$argo_vl',
+    'argo_tr': '$argo_tr',
+    'urlpath_vless': '$urlpath_vless',
+    'urlpath_trojan': '$urlpath_trojan',
+    'node_tag': '$node_tag',
+    'default_label': '$default_label',
+    'server_ip': '$server_ip',
+    'sub_port': int('$sub_port'),
+    'sub_uuid': '$sub_uuid',
+    'sub_token': '$sub_token',
+}
+os.makedirs('/var/www/suoha_sub', exist_ok=True)
+with open(meta_file, 'w', encoding='utf-8') as f:
+    json.dump(meta, f, indent=2, ensure_ascii=False)
+"
+    python3 /var/www/suoha_sub/sub_server.py --regen
+}
+
 function start_sub_server(){
     local web_dir="$1"
     local port="$2"
 
+    ensure_sub_server_script
     pkill -f "http.server $port" >/dev/null 2>&1
+    pkill -f "sub_server.py $port" >/dev/null 2>&1
     fuser -k ${port}/tcp >/dev/null 2>&1
 
     if [ -x "$(command -v python3)" ]; then
-        nohup python3 -m http.server $port --directory "$web_dir" >/dev/null 2>&1 &
+        nohup python3 "${web_dir}/sub_server.py" "$port" >/dev/null 2>&1 &
     elif [ -x "$(command -v python)" ]; then
         cd "$web_dir" && nohup python -m SimpleHTTPServer $port >/dev/null 2>&1 &
         cd - >/dev/null 2>&1
@@ -289,99 +880,6 @@ if [[ -z "$node_tag" || "$node_tag" == "--" ]]; then
     node_tag="Argo_Node"
 fi
 
-opt_domains=("cf.090227.xyz" "cloudflare.182682.xyz")
-opt_labels=("优选cf.090227" "优选182682")
-
-> nodes.txt
-
-cat>clash.yaml<<EOF
-port: 7890
-socks-port: 7891
-allow-lan: false
-mode: rule
-log-level: info
-proxies:
-EOF
-
-proxy_names=()
-
-vless_domains=("$argo_vl" "${opt_domains[@]}")
-vless_labels=("默认Argo" "${opt_labels[@]}")
-
-for idx in "${!vless_domains[@]}"; do
-    d="${vless_domains[$idx]}"
-    l="${vless_labels[$idx]}"
-
-    vless_tls="vless://${uuid}@${d}:443?encryption=none&security=tls&sni=${argo_vl}&type=ws&host=${argo_vl}&path=%2F${urlpath_vless}#${node_tag}-VLESS-${l}-443"
-    echo "$vless_tls" >> nodes.txt
-    proxy_names+=("${node_tag}-VLESS-${l}-443")
-    cat>>clash.yaml<<EOF
-  - name: "${node_tag}-VLESS-${l}-443"
-    type: vless
-    server: ${d}
-    port: 443
-    uuid: ${uuid}
-    cipher: auto
-    tls: true
-    udp: true
-    servername: ${argo_vl}
-    network: ws
-    ws-opts:
-      path: /${urlpath_vless}
-      headers:
-        Host: ${argo_vl}
-EOF
-done
-
-trojan_domains=("$argo_tr" "${opt_domains[@]}")
-trojan_labels=("默认Argo" "${opt_labels[@]}")
-
-for idx in "${!trojan_domains[@]}"; do
-    d="${trojan_domains[$idx]}"
-    l="${trojan_labels[$idx]}"
-
-    trojan_tls="trojan://${uuid}@${d}:443?security=tls&sni=${argo_tr}&type=ws&host=${argo_tr}&path=%2F${urlpath_trojan}#${node_tag}-Trojan-${l}-443"
-    echo "$trojan_tls" >> nodes.txt
-    proxy_names+=("${node_tag}-Trojan-${l}-443")
-    cat>>clash.yaml<<EOF
-  - name: "${node_tag}-Trojan-${l}-443"
-    type: trojan
-    server: ${d}
-    port: 443
-    password: ${uuid}
-    udp: true
-    sni: ${argo_tr}
-    network: ws
-    ws-opts:
-      path: /${urlpath_trojan}
-      headers:
-        Host: ${argo_tr}
-EOF
-done
-
-cat>>clash.yaml<<EOF
-proxy-groups:
-  - name: PROXY
-    type: select
-    proxies:
-EOF
-
-for pname in "${proxy_names[@]}"; do
-    echo "      - \"${pname}\"" >> clash.yaml
-done
-
-cat>>clash.yaml<<EOF
-rules:
-  - MATCH,PROXY
-EOF
-
-if [ $(grep -i PRETTY_NAME /etc/os-release | cut -d \" -f2 | awk '{print $1}') == "Alpine" ]
-then
-    base64 nodes.txt | tr -d '\n' > sub.txt
-else
-    base64 -w 0 nodes.txt > sub.txt
-fi
-
 server_ip=$(get_server_ip)
 if [ -z "$server_ip" ]; then
     server_ip="$argo_vl"
@@ -389,39 +887,12 @@ fi
 
 sub_port=$(get_or_create_sub_port)
 sub_uuid=$(get_or_create_sub_uuid)
-sync_to_static_web "/opt/suoha_quick"
+sub_token=$(get_or_create_sub_token)
+
+write_sub_meta "quick" "/opt/suoha_quick" "$uuid" "$argo_vl" "$argo_tr" "$urlpath_vless" "$urlpath_trojan" "$node_tag" "默认Argo" "$server_ip" "$sub_port" "$sub_uuid" "$sub_token"
 start_sub_server "/var/www/suoha_sub" "$sub_port"
 
-sub_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/sub.txt"
-clash_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/clash.yaml"
-
-cat>v2ray.txt<<EOF
-======================== 一键梭哈 443 TLS 节点列表 ========================
-$(cat nodes.txt)
-
-端口替换提示:
-443 端口可根据需要改为 CF 其它 TLS 端口: 2053, 2083, 2087, 2096, 8443
-
-======================== 客户端订阅及导入链接 ========================
-本机固定订阅服务端口: ${sub_port} (已永久保存，重新梭哈无需重新导入客户端)
-
-1. 通用订阅链接 (支持 v2rayN / NekoBox / Shadowrocket):
-${sub_online_url}
-
-2. v2rayN / NekoBox 一键导入协议链接:
-sub://${sub_online_url}
-
-3. Clash / Clash.Meta / Mihomo 一键导入配置:
-clash://install-config?url=${clash_online_url}
-
-4. Clash 在线配置文件直链:
-${clash_online_url}
-
-持久订阅存储目录: /var/www/suoha_sub/${sub_uuid}/
-=====================================================================
-EOF
-
-cat v2ray.txt
+cat /opt/suoha_quick/v2ray.txt
 echo -e "\n信息已经保存在 /opt/suoha_quick/v2ray.txt,再次查看请运行 cat /opt/suoha_quick/v2ray.txt"
 }
 
@@ -532,66 +1003,31 @@ except Exception as e:
     fi
     local ss_link="ss://${ss_base64}@[${ipv6_addr}]:${ss_port}#IPv6-SS-Direct"
 
-    # 读取旧 nodes.txt，去除旧 SS 节点后安全追加，绝不破坏原有节点
-    local work_nodes="${xray_dir}/nodes.txt"
-    touch "$work_nodes"
-    sed -i '/IPv6-SS-Direct/d' "$work_nodes"
-    echo "$ss_link" >> "$work_nodes"
+    ensure_sub_server_script
+    python3 -c "
+import json, os
 
-    # 追加到 clash.yaml
-    local clash_file="${xray_dir}/clash.yaml"
-    if [ -f "$clash_file" ]; then
-        python3 -c "
-yaml_file = '$clash_file'
-try:
-    with open(yaml_file, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    
-    filtered = []
-    skip = False
-    for l in lines:
-        if 'name: \"IPv6-SS-Direct\"' in l:
-            skip = True
-            continue
-        if skip and l.startswith('  - name:'):
-            skip = False
-        if not skip and '      - \"IPv6-SS-Direct\"' not in l:
-            filtered.append(l)
-    
-    new_lines = []
-    proxy_inserted = False
-    group_inserted = False
-    for line in filtered:
-        if line.strip().startswith('proxy-groups:') and not proxy_inserted:
-            new_lines.append('  - name: \"IPv6-SS-Direct\"\n')
-            new_lines.append('    type: ss\n')
-            new_lines.append('    server: \"${ipv6_addr}\"\n')
-            new_lines.append('    port: ${ss_port}\n')
-            new_lines.append('    cipher: ${ss_method}\n')
-            new_lines.append('    password: \"${ss_password}\"\n')
-            new_lines.append('    udp: true\n')
-            proxy_inserted = True
-        if line.strip().startswith('rules:') and not group_inserted:
-            new_lines.append('      - \"IPv6-SS-Direct\"\n')
-            group_inserted = True
-        new_lines.append(line)
-    
-    with open(yaml_file, 'w', encoding='utf-8') as f:
-        f.writelines(new_lines)
-except Exception:
-    pass
+meta_file = '/var/www/suoha_sub/meta.json'
+meta = {}
+if os.path.exists(meta_file):
+    try:
+        with open(meta_file, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+    except Exception:
+        meta = {}
+
+meta['ss'] = {
+    'ipv6_addr': '$ipv6_addr',
+    'ss_port': int('$ss_port'),
+    'ss_method': '$ss_method',
+    'ss_password': '$ss_password',
+    'ss_link': '$ss_link',
+}
+os.makedirs('/var/www/suoha_sub', exist_ok=True)
+with open(meta_file, 'w', encoding='utf-8') as f:
+    json.dump(meta, f, indent=2, ensure_ascii=False)
 "
-    fi
-
-    # 重新生成 Base64 订阅并同步
-    if [ $(grep -i PRETTY_NAME /etc/os-release | cut -d \" -f2 | awk '{print $1}') == "Alpine" ]
-    then
-        base64 "$work_nodes" | tr -d '\n' > "${xray_dir}/sub.txt"
-    else
-        base64 -w 0 "$work_nodes" > "${xray_dir}/sub.txt"
-    fi
-
-    sync_to_static_web "$xray_dir"
+    python3 /var/www/suoha_sub/sub_server.py --regen
 
     local sub_port=$(get_or_create_sub_port)
     local sub_uuid=$(get_or_create_sub_uuid)
@@ -757,88 +1193,6 @@ if [[ -z "$node_tag" || "$node_tag" == "--" ]]; then
     node_tag="Argo_Node"
 fi
 
-domains=("$domain" "cf.090227.xyz" "cloudflare.182682.xyz")
-labels=("自定域名" "优选cf.090227" "优选182682")
-
-> /opt/suoha/nodes.txt
-
-cat>/opt/suoha/clash.yaml<<EOF
-port: 7890
-socks-port: 7891
-allow-lan: false
-mode: rule
-log-level: info
-proxies:
-EOF
-
-proxy_names=()
-
-for idx in "${!domains[@]}"; do
-    d="${domains[$idx]}"
-    l="${labels[$idx]}"
-
-    vless_tls="vless://${uuid}@${d}:443?encryption=none&security=tls&sni=${domain}&type=ws&host=${domain}&path=%2F${urlpath_vless}#${node_tag}-VLESS-${l}-443"
-    echo "$vless_tls" >> /opt/suoha/nodes.txt
-    proxy_names+=("${node_tag}-VLESS-${l}-443")
-    cat>>/opt/suoha/clash.yaml<<EOF
-  - name: "${node_tag}-VLESS-${l}-443"
-    type: vless
-    server: ${d}
-    port: 443
-    uuid: ${uuid}
-    cipher: auto
-    tls: true
-    udp: true
-    servername: ${domain}
-    network: ws
-    ws-opts:
-      path: /${urlpath_vless}
-      headers:
-        Host: ${domain}
-EOF
-
-    trojan_tls="trojan://${uuid}@${d}:443?security=tls&sni=${domain}&type=ws&host=${domain}&path=%2F${urlpath_trojan}#${node_tag}-Trojan-${l}-443"
-    echo "$trojan_tls" >> /opt/suoha/nodes.txt
-    proxy_names+=("${node_tag}-Trojan-${l}-443")
-    cat>>/opt/suoha/clash.yaml<<EOF
-  - name: "${node_tag}-Trojan-${l}-443"
-    type: trojan
-    server: ${d}
-    port: 443
-    password: ${uuid}
-    udp: true
-    sni: ${domain}
-    network: ws
-    ws-opts:
-      path: /${urlpath_trojan}
-      headers:
-        Host: ${domain}
-EOF
-done
-
-cat>>/opt/suoha/clash.yaml<<EOF
-proxy-groups:
-  - name: PROXY
-    type: select
-    proxies:
-EOF
-
-for pname in "${proxy_names[@]}"; do
-    echo "      - \"${pname}\"" >> /opt/suoha/clash.yaml
-done
-
-cat>>/opt/suoha/clash.yaml<<EOF
-rules:
-  - MATCH,PROXY
-EOF
-
-if [ $(grep -i PRETTY_NAME /etc/os-release | cut -d \" -f2 | awk '{print $1}') == "Alpine" ]
-then
-    base64 /opt/suoha/nodes.txt | tr -d '\n' > /opt/suoha/sub.txt
-else
-    base64 -w 0 /opt/suoha/nodes.txt > /opt/suoha/sub.txt
-fi
-
 server_ip=$(get_server_ip)
 if [ -z "$server_ip" ]; then
     server_ip="$domain"
@@ -846,37 +1200,10 @@ fi
 
 sub_port=$(get_or_create_sub_port)
 sub_uuid=$(get_or_create_sub_uuid)
-sync_to_static_web "/opt/suoha"
+sub_token=$(get_or_create_sub_token)
+
+write_sub_meta "installed" "/opt/suoha" "$uuid" "$domain" "$domain" "$urlpath_vless" "$urlpath_trojan" "$node_tag" "自定域名" "$server_ip" "$sub_port" "$sub_uuid" "$sub_token"
 start_sub_server "/var/www/suoha_sub" "$sub_port"
-
-sub_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/sub.txt"
-clash_online_url="http://${server_ip}:${sub_port}/${sub_uuid}/clash.yaml"
-
-cat>/opt/suoha/v2ray.txt<<EOF
-======================== 节点连接信息 ========================
-$(cat /opt/suoha/nodes.txt)
-
-端口说明:
-443 端口可根据需要改为 CF 其它 TLS 端口: 2053, 2083, 2087, 2096, 8443
-
-======================== 客户端订阅及导入链接 ========================
-本机固定订阅服务端口: ${sub_port} (已永久保存，重新部署无需重新导入客户端)
-
-1. 通用在线订阅链接 (适用于 v2rayN / NekoBox / Shadowrocket):
-${sub_online_url}
-
-2. v2rayN / NekoBox 一键导入协议链接:
-sub://${sub_online_url}
-
-3. Clash / Clash.Meta / Mihomo 一键导入配置:
-clash://install-config?url=${clash_online_url}
-
-4. Clash 在线配置文件直链:
-${clash_online_url}
-
-持久订阅存储目录: /var/www/suoha_sub/${sub_uuid}/
-==============================================================
-EOF
 
 rm -rf argo.log
 
@@ -1028,7 +1355,8 @@ then
     kill -9 \$(ps -ef | grep xray | grep -v grep | awk '{print \$1}') >/dev/null 2>&1
     kill -9 \$(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print \$1}') >/dev/null 2>&1
     pkill -f "http.server" >/dev/null 2>&1
-    rm -rf /opt/suoha /opt/suoha_quick /etc/local.d/cloudflared.start /etc/local.d/xray.start /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
+    pkill -f "sub_server.py" >/dev/null 2>&1
+    rm -rf /opt/suoha /opt/suoha_quick /etc/local.d/cloudflared.start /etc/local.d/xray.start /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /etc/suoha_sub_token /var/www/suoha_sub
     echo 所有服务都卸载完成
     echo 彻底删除授权记录
     echo 请访问 https://dash.cloudflare.com/profile/api-tokens
@@ -1114,7 +1442,8 @@ then
     kill -9 \$(ps -ef | grep xray | grep -v grep | awk '{print \$2}') >/dev/null 2>&1
     kill -9 \$(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print \$2}') >/dev/null 2>&1
     pkill -f "http.server" >/dev/null 2>&1
-    rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
+    pkill -f "sub_server.py" >/dev/null 2>&1
+    rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /etc/suoha_sub_token /var/www/suoha_sub
     systemctl --system daemon-reload
     echo 所有服务都卸载完成
     echo 彻底删除授权记录
@@ -1217,7 +1546,8 @@ then
         kill -9 $(ps -ef | grep xray | grep -v grep | awk '{print $1}') >/dev/null 2>&1
         kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') >/dev/null 2>&1
         pkill -f "http.server" >/dev/null 2>&1
-        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
+        pkill -f "sub_server.py" >/dev/null 2>&1
+        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha /etc/suoha_sub_port /etc/suoha_sub_uuid /etc/suoha_sub_token /var/www/suoha_sub
     else
         systemctl stop cloudflared.service
         systemctl stop xray.service
@@ -1226,7 +1556,8 @@ then
         kill -9 $(ps -ef | grep xray | grep -v grep | awk '{print $2}') >/dev/null 2>&1
         kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $2}') >/dev/null 2>&1
         pkill -f "http.server" >/dev/null 2>&1
-        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /var/www/suoha_sub
+        pkill -f "sub_server.py" >/dev/null 2>&1
+        rm -rf /opt/suoha /opt/suoha_quick /lib/systemd/system/cloudflared.service /lib/systemd/system/xray.service /usr/bin/suoha ~/.cloudflared /etc/suoha_sub_port /etc/suoha_sub_uuid /etc/suoha_sub_token /var/www/suoha_sub
         systemctl --system daemon-reload
     fi
     clear
@@ -1245,6 +1576,7 @@ then
         kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $2}') >/dev/null 2>&1
     fi
     pkill -f "http.server" >/dev/null 2>&1
+    pkill -f "sub_server.py" >/dev/null 2>&1
     rm -rf /opt/suoha_quick/nodes.txt /opt/suoha_quick/sub.txt /opt/suoha_quick/clash.yaml
 elif [ $mode == 5 ]
 then
