@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="New-Suoha Web 管理面板：轻量级 Cloudflare Argo 隧道与 Xray 多协议优选节点控制台" />
+  <title>New-Suoha 控制台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23f6821f'/%3E%3Cpath d='M9 17.5L16.5 7v8h6.5L15.5 25v-7.5H9z' fill='%230d1117'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- ==================== Login View ==================== -->
+  <main id="login-view" class="login-shell hidden">
+    <section class="login-panel" aria-labelledby="login-heading">
+      <div class="login-brand">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">⚡</span>
+          <div>
+            <h2 id="login-heading" class="login-title">New-Suoha</h2>
+            <p class="login-subtitle">Argo 隧道与优选订阅管理面板</p>
+          </div>
+        </div>
+        <button id="btn-theme-login" type="button" class="btn btn-sm" title="切换明暗主题">主题</button>
+      </div>
+
+      <form id="login-form" class="section-stack" autocomplete="on">
+        <div class="field">
+          <label class="field-label" for="login-username">管理员账号</label>
+          <input id="login-username" name="username" type="text" required autocomplete="username" placeholder="admin" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="login-password">登录密码</label>
+          <input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="请输入密码" />
+        </div>
+        <div id="login-error" class="helper-banner hidden" role="alert"></div>
+        <button id="btn-login-submit" type="submit" class="btn btn-primary" style="width:100%;padding:9px 14px;">登录面板</button>
+      </form>
+    </section>
+  </main>
+
+  <!-- ==================== Authenticated Main App ==================== -->
+  <div id="app-view" class="app-shell hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">⚡</span>
+          <div>
+            <h1 class="app-heading">New-Suoha 控制台</h1>
+            <div class="app-tagline">Cloudflare Argo + Xray 优选节点控制平面</div>
+          </div>
+        </div>
+
+        <div class="status-strip" aria-live="polite">
+          <span id="chip-xray" class="status-chip">
+            <span class="status-dot"></span>
+            <span id="chip-xray-text">Xray: 检测中</span>
+          </span>
+          <span id="chip-tunnel" class="status-chip">
+            <span class="status-dot"></span>
+            <span id="chip-tunnel-text">Argo: 检测中</span>
+          </span>
+          <span id="chip-ss" class="status-chip">
+            <span class="status-dot"></span>
+            <span id="chip-ss-text">IPv6 SS: 未启用</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <button id="btn-quick-start" type="button" class="btn btn-primary btn-sm">一键启动/重连</button>
+        <button id="btn-quick-stop" type="button" class="btn btn-danger btn-sm">停止服务</button>
+        <button id="btn-refresh-all" type="button" class="btn btn-sm">刷新</button>
+        <button id="btn-theme-app" type="button" class="btn btn-sm">亮/暗</button>
+        <button id="btn-logout" type="button" class="btn btn-sm">退出</button>
+      </div>
+    </header>
+
+    <nav class="nav-tabs" role="tablist" aria-label="功能分区">
+      <button type="button" class="nav-tab active" data-tab="tunnel" id="nav-tab-tunnel">隧道管理</button>
+      <button type="button" class="nav-tab" data-tab="sub" id="nav-tab-sub">订阅与节点</button>
+      <button type="button" class="nav-tab" data-tab="protocols" id="nav-tab-protocols">协议配置</button>
+      <button type="button" class="nav-tab" data-tab="preferred" id="nav-tab-preferred">优选 IP 管理</button>
+      <button type="button" class="nav-tab" data-tab="settings" id="nav-tab-settings">日志与设置</button>
+    </nav>
+
+    <!-- ==================== Tab 1: Tunnel Management ==================== -->
+    <section id="pane-tunnel" class="section-stack">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">当前生效隧道与网络概览</h2>
+            <p class="card-desc">展示实时连接域名与服务器网络出口，隧道域名变更时订阅文件会自动无感更新。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-detect-net" type="button" class="btn btn-sm">重新检测本机 IP</button>
+          </div>
+        </div>
+
+        <div class="kv-list" id="active-domain-list">
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">VLESS-WS 隧道域名</div>
+              <div id="val-argo-vl" class="kv-value mono">暂未启动</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="val-argo-vl">复制</button>
+          </div>
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">Trojan-WS 隧道域名</div>
+              <div id="val-argo-tr" class="kv-value mono">暂未启动</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="val-argo-tr">复制</button>
+          </div>
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">Argo 穿透访问地址 <span class="badge-tag">免开端口 HTTPS</span></div>
+              <div id="val-argo-panel" class="kv-value mono">未开启穿透域名</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="val-argo-panel">复制</button>
+          </div>
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">本机公网地址 (IPv4 / IPv6)</div>
+              <div id="val-server-ips" class="kv-value mono">-</div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Cloudflare Argo 隧道部署模式</h2>
+            <p class="card-desc">进程由面板常驻守护，机器重启或隧道意外断流后会自动重连并刷新订阅。</p>
+          </div>
+        </div>
+
+        <div class="mode-selector" role="radiogroup" aria-label="隧道模式选择">
+          <button type="button" id="mode-btn-quick" class="mode-option selected" data-mode="quick">
+            <span class="mode-option-title">梭哈模式 (Quick Tunnel)</span>
+            <span class="mode-option-sub">无需自有域名与证书，自动分配 *.trycloudflare.com 临时隧道并守护自愈</span>
+          </button>
+          <button type="button" id="mode-btn-token" class="mode-option" data-mode="token">
+            <span class="mode-option-title">固定隧道 (CF Zero Trust Token)</span>
+            <span class="mode-option-sub">直接粘贴 Cloudflare Zero Trust 隧道 Token，长期绑定自定义二级域名</span>
+          </button>
+        </div>
+
+        <div class="form-grid">
+          <div class="field span-2">
+            <div class="switch-row">
+              <div class="switch-meta">
+                <span class="switch-title">启用 Argo 节点隧道常驻运行</span>
+                <span class="switch-sub">开启后随系统开机自启，首次运行若缺少 xray / cloudflared 内核将自动下载</span>
+              </div>
+              <label class="toggle">
+                <input id="tun-enabled" type="checkbox" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="tun-edge-ip">Argo 边缘连接协议</label>
+            <select id="tun-edge-ip">
+              <option value="4">IPv4 连接边缘节点 (默认推荐)</option>
+              <option value="6">IPv6 连接边缘节点 (纯 IPv6 机器适用)</option>
+            </select>
+          </div>
+
+          <!-- Quick Tunnel Exclusive Field -->
+          <div class="field" id="field-quick-topology">
+            <label class="field-label" for="tun-quick-topology">梭哈隧道拓扑结构</label>
+            <select id="tun-quick-topology">
+              <option value="unified">单隧道网关复用 (推荐：省内存 + 自动提供 HTTPS 订阅与面板穿透)</option>
+              <option value="dual">经典双独立隧道 (VLESS 与 Trojan 各启独立 *.trycloudflare.com 进程)</option>
+            </select>
+          </div>
+
+          <!-- CF Zero Trust Token Exclusive Fields -->
+          <div class="field hidden" id="field-token-domain">
+            <label class="field-label" for="tun-custom-domain">绑定的完整二级域名</label>
+            <input id="tun-custom-domain" type="text" class="mono" placeholder="例如: sub.example.com" />
+          </div>
+
+          <div class="field span-2 hidden" id="field-token-secret">
+            <label class="field-label" for="tun-cf-token">
+              <span>Cloudflare Zero Trust Tunnel Token</span>
+              <span class="field-hint">以 eyJ 开头的隧道连接令牌</span>
+            </label>
+            <input id="tun-cf-token" type="password" class="mono" placeholder="eyJhIjoi..." autocomplete="off" />
+          </div>
+
+          <div class="field span-2 hidden" id="field-token-guide">
+            <div class="helper-banner">
+              <strong>CF Zero Trust 后台极简配置提示：</strong><br />
+              在 Cloudflare Zero Trust 控制台创建隧道后，进入 <em>Public Hostname</em> 添加一条规则，将上方域名指向本地统一网关地址：<br />
+              <div class="code-strip" style="margin-top:8px;">
+                <code id="val-local-gateway">http://127.0.0.1:25000</code>
+                <button type="button" class="btn btn-sm" data-copy-target="val-local-gateway">复制本地地址</button>
+              </div>
+              <span style="display:block;margin-top:6px;font-size:12px;opacity:0.88;">无需在 CF 后台配置繁琐的路径分流，面板内置网关会自动识别并转发 VLESS-WS、Trojan-WS、HTTPS 订阅及面板请求。</span>
+            </div>
+          </div>
+
+          <div class="field span-2" id="field-aux-panel-tunnel">
+            <div class="switch-row">
+              <div class="switch-meta">
+                <span class="switch-title">额外启动独立面板/订阅穿透临时隧道</span>
+                <span class="switch-sub">当使用“双独立隧道”或未开启主节点隧道时，单独分配一个临时 HTTPS 域名穿透订阅与面板</span>
+              </div>
+              <label class="toggle">
+                <input id="tun-panel-quick" type="checkbox" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer-bar">
+          <button id="btn-save-tunnel" type="button" class="btn btn-primary">保存并应用隧道配置</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- ==================== Tab 2: Subscriptions & Nodes ==================== -->
+    <section id="pane-sub" class="section-stack hidden">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">在线订阅地址 (免重复导入)</h2>
+            <p class="card-desc">端口与安全 UUID 持久固定；重新梭哈、重启机器或优选 IP 更新后，客户端只需点击“更新订阅”。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-rotate-sub-uuid" type="button" class="btn btn-danger btn-sm">重置订阅安全 UUID</button>
+          </div>
+        </div>
+
+        <div class="kv-list">
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">直连通用订阅 (v2rayN / NekoBox / Shadowrocket / v2rayNG)</div>
+              <div id="url-direct-sub" class="kv-value mono">-</div>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-sm" data-copy-target="url-direct-sub">复制</button>
+              <button type="button" class="btn btn-sm" data-qr-target="url-direct-sub" data-qr-title="直连通用订阅 (Base64)">扫码</button>
+              <a id="link-sub-import" href="#" class="btn btn-primary btn-sm">一键导入</a>
+            </div>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">直连 Clash / Mihomo 配置 (内置 AUTO 自动测速选优策略组)</div>
+              <div id="url-direct-clash" class="kv-value mono">-</div>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-sm" data-copy-target="url-direct-clash">复制</button>
+              <button type="button" class="btn btn-sm" data-qr-target="url-direct-clash" data-qr-title="直连 Clash 订阅链接">扫码</button>
+              <a id="link-clash-import" href="#" class="btn btn-primary btn-sm">导入 Clash</a>
+            </div>
+          </div>
+
+          <div id="row-argo-sub" class="kv-item hidden">
+            <div class="kv-meta">
+              <div class="kv-label">Argo 免端口 HTTPS 通用订阅 <span class="badge-tag">推荐无公网端口环境</span></div>
+              <div id="url-argo-sub" class="kv-value mono">-</div>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-sm" data-copy-target="url-argo-sub">复制</button>
+              <button type="button" class="btn btn-sm" data-qr-target="url-argo-sub" data-qr-title="Argo HTTPS 通用订阅">扫码</button>
+            </div>
+          </div>
+
+          <div id="row-argo-clash" class="kv-item hidden">
+            <div class="kv-meta">
+              <div class="kv-label">Argo 免端口 HTTPS Clash / Mihomo 配置 <span class="badge-tag">HTTPS</span></div>
+              <div id="url-argo-clash" class="kv-value mono">-</div>
+            </div>
+            <div class="card-actions">
+              <button type="button" class="btn btn-sm" data-copy-target="url-argo-clash">复制</button>
+              <button type="button" class="btn btn-sm" data-qr-target="url-argo-clash" data-qr-title="Argo HTTPS Clash 配置">扫码</button>
+              <a id="link-argo-clash-import" href="#" class="btn btn-primary btn-sm">导入 Clash</a>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">当前可用节点矩阵 (<span id="node-total-count">0</span>)</h2>
+            <p class="card-desc">包含动态优选 IP 置顶节点、默认隧道节点、公共优选域名保底节点及共存的 IPv6 SS 直连节点。</p>
+          </div>
+          <div class="card-actions">
+            <select id="node-proto-filter" style="width:auto;padding:5px 10px;font-size:12.5px;">
+              <option value="all">全部协议</option>
+              <option value="vless">仅 VLESS</option>
+              <option value="trojan">仅 Trojan</option>
+              <option value="ss">仅 IPv6 SS</option>
+            </select>
+            <button id="btn-copy-all-nodes" type="button" class="btn btn-primary btn-sm">复制全部节点链接</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:90px;">协议</th>
+                <th>节点名称</th>
+                <th>连接目标 (Host:Port)</th>
+                <th style="width:140px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="nodes-tbody">
+              <tr><td colspan="4" class="empty-placeholder">暂无节点，请先启动隧道或启用 IPv6 SS</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <!-- ==================== Tab 3: Protocol Config ==================== -->
+    <section id="pane-protocols" class="section-stack hidden">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">基础节点参数</h2>
+            <p class="card-desc">修改协议参数后点击底部保存，面板将精准热重载 Xray 并重新生成订阅，不会中断正在运行的 Argo 隧道。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-rotate-node-uuid" type="button" class="btn btn-sm">一键重置 UUID 与路径</button>
+          </div>
+        </div>
+
+        <div class="form-grid cols-3">
+          <div class="field">
+            <label class="field-label" for="proto-node-tag">节点名称前缀</label>
+            <input id="proto-node-tag" type="text" placeholder="Argo_Node" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-uuid">节点共享 UUID / Trojan 密码</label>
+            <input id="proto-uuid" type="text" class="mono" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-tls-port">默认 Cloudflare TLS 端口</label>
+            <select id="proto-tls-port">
+              <option value="443">443 (默认推荐)</option>
+              <option value="2053">2053</option>
+              <option value="2083">2083</option>
+              <option value="2087">2087</option>
+              <option value="2096">2096</option>
+              <option value="8443">8443</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- VLESS-WS -->
+        <div class="switch-row" style="margin-bottom:12px;">
+          <div class="switch-meta">
+            <span class="switch-title">启用 VLESS-WS 协议入站</span>
+            <span class="switch-sub">通过 Cloudflare Argo 隧道承载 443 TLS 加密流量</span>
+          </div>
+          <label class="toggle">
+            <input id="proto-vless-enabled" type="checkbox" />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="form-grid" style="margin-bottom:16px;">
+          <div class="field">
+            <label class="field-label" for="proto-vless-path">VLESS WebSocket 路径 (不含前导 /)</label>
+            <input id="proto-vless-path" type="text" class="mono" placeholder="vl-xxxx" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-vless-port">本地监听端口 (127.0.0.1)</label>
+            <input id="proto-vless-port" type="number" min="1024" max="65535" class="mono" />
+          </div>
+        </div>
+
+        <!-- Trojan-WS -->
+        <div class="switch-row" style="margin-bottom:12px;">
+          <div class="switch-meta">
+            <span class="switch-title">启用 Trojan-WS 协议入站</span>
+            <span class="switch-sub">与 VLESS-WS 双协议原生并发共存</span>
+          </div>
+          <label class="toggle">
+            <input id="proto-trojan-enabled" type="checkbox" />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="form-grid" style="margin-bottom:16px;">
+          <div class="field">
+            <label class="field-label" for="proto-trojan-path">Trojan WebSocket 路径 (不含前导 /)</label>
+            <input id="proto-trojan-path" type="text" class="mono" placeholder="tr-xxxx" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-trojan-port">本地监听端口 (127.0.0.1)</label>
+            <input id="proto-trojan-port" type="number" min="1024" max="65535" class="mono" />
+          </div>
+        </div>
+
+        <!-- IPv6 Shadowsocks -->
+        <div class="switch-row" style="margin-bottom:12px;">
+          <div class="switch-meta">
+            <span class="switch-title">启用 IPv6 Shadowsocks 直连共存部署</span>
+            <span class="switch-sub">监听本机公网 IPv6 ([::]) 提供高速直连节点，自动合并至同一订阅</span>
+          </div>
+          <label class="toggle">
+            <input id="proto-ss-enabled" type="checkbox" />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label class="field-label" for="proto-ss-ipv6">本机公网 IPv6 地址</label>
+            <div class="input-row">
+              <input id="proto-ss-ipv6" type="text" class="mono" placeholder="自动检测或手动填写公网 IPv6" />
+              <button id="btn-fill-ipv6" type="button" class="btn btn-sm">自动检测</button>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-ss-port">Shadowsocks 监听端口</label>
+            <input id="proto-ss-port" type="number" min="1" max="65535" class="mono" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-ss-method">加密方式</label>
+            <select id="proto-ss-method">
+              <option value="aes-128-gcm">aes-128-gcm (默认高兼容)</option>
+              <option value="aes-256-gcm">aes-256-gcm</option>
+              <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-ss-pass">Shadowsocks 密码</label>
+            <input id="proto-ss-pass" type="text" class="mono" />
+          </div>
+        </div>
+
+        <div class="footer-bar">
+          <button id="btn-save-protocols" type="button" class="btn btn-primary">保存协议配置并热重载 Xray</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- ==================== Tab 4: Preferred IPs & Domains ==================== -->
+    <section id="pane-preferred" class="section-stack hidden">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">本地优选测速助手 (suoha-client) 联动</h2>
+            <p class="card-desc">在本地电脑或软路由运行客户端测速，结果将自动上传至此面板并置顶更新订阅。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-rotate-client-token" type="button" class="btn btn-danger btn-sm">重置客户端 Token</button>
+          </div>
+        </div>
+
+        <div class="kv-list">
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">最近优选更新时间 / 来源</div>
+              <div id="val-pref-status" class="kv-value">暂未上传</div>
+            </div>
+            <div class="card-actions">
+              <span class="mono" style="font-size:12.5px;color:var(--text-secondary);">Token: <strong id="val-client-token">-</strong></span>
+              <button type="button" class="btn btn-sm" data-copy-target="val-client-token">复制 Token</button>
+            </div>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">Linux / macOS / OpenWrt 后台常驻定时测速命令</div>
+              <div id="cmd-client-linux" class="kv-value mono">-</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-linux">复制命令</button>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">Windows 定时测速命令 (CMD / PowerShell)</div>
+              <div id="cmd-client-win" class="kv-value mono">-</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-win">复制命令</button>
+          </div>
+
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">单次立即测速并上传 (-once)</div>
+              <div id="cmd-client-once" class="kv-value mono">-</div>
+            </div>
+            <button type="button" class="btn btn-sm" data-copy-target="cmd-client-once">复制命令</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">动态优选 IP / 优选域名列表 (<span id="pref-ip-count">0</span>)</h2>
+            <p class="card-desc">支持手动增删改或批量粘贴导入，保存后实时置顶写入订阅。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-toggle-batch" type="button" class="btn btn-sm">批量粘贴导入</button>
+            <button id="btn-add-pref-row" type="button" class="btn btn-sm">+ 新增一行</button>
+            <button id="btn-clear-pref" type="button" class="btn btn-danger btn-sm">清空列表</button>
+          </div>
+        </div>
+
+        <div id="batch-import-box" class="panel-card hidden" style="background:var(--bg-elevated);margin-bottom:14px;padding:14px;">
+          <div class="field">
+            <label class="field-label" for="batch-pref-textarea">
+              <span>每行一条，支持格式：<code>104.16.10.1</code>、<code>104.16.10.2:2053#香港优选</code>、<code>[2606:4700::1]:8443#IPv6优选</code></span>
+            </label>
+            <textarea id="batch-pref-textarea" class="mono" placeholder="104.16.10.1:443#优选HKG&#10;172.67.1.2:2053#优选SJC"></textarea>
+          </div>
+          <div class="footer-bar" style="margin-top:10px;">
+            <button id="btn-batch-append" type="button" class="btn btn-sm">追加导入并保存</button>
+            <button id="btn-batch-replace" type="button" class="btn btn-primary btn-sm">覆盖导入并保存</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>优选 IP 或域名</th>
+                <th style="width:105px;">TLS 端口</th>
+                <th style="width:95px;">机房</th>
+                <th style="width:95px;">延迟</th>
+                <th style="width:100px;">速度</th>
+                <th>节点标签名称</th>
+                <th style="width:76px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="pref-ips-tbody">
+              <tr><td colspan="7" class="empty-placeholder">当前无动态优选 IP（订阅将使用默认隧道域名与下方保底公共优选域名）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="footer-bar">
+          <button id="btn-save-pref-table" type="button" class="btn btn-primary">保存优选 IP 列表</button>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">保底公共优选域名与快捷 TLS 端口切换</h2>
+            <p class="card-desc">始终附着在订阅末尾作为稳定保底；点击下方端口可一键切换全部优选节点的 Cloudflare HTTPS 端口。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-add-fallback" type="button" class="btn btn-sm">+ 添加保底域名</button>
+          </div>
+        </div>
+
+        <div class="field" style="margin-bottom:14px;">
+          <span class="field-label">一键批量切换 Cloudflare TLS 端口 (点击立即应用至默认端口与保底域名)</span>
+          <div class="port-pills" id="cf-port-pills">
+            <button type="button" class="port-pill" data-cfport="443">443</button>
+            <button type="button" class="port-pill" data-cfport="2053">2053</button>
+            <button type="button" class="port-pill" data-cfport="2083">2083</button>
+            <button type="button" class="port-pill" data-cfport="2087">2087</button>
+            <button type="button" class="port-pill" data-cfport="2096">2096</button>
+            <button type="button" class="port-pill" data-cfport="8443">8443</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:70px;">启用</th>
+                <th>公共优选域名 / 地址</th>
+                <th style="width:110px;">端口</th>
+                <th>备注标签</th>
+                <th style="width:76px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="fallbacks-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="footer-bar">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-secondary);margin-right:auto;cursor:pointer;">
+            <input id="chk-sync-port-pref" type="checkbox" />
+            <span>保存时将选定端口同步覆盖至上方动态优选 IP 列表</span>
+          </label>
+          <button id="btn-save-fallbacks" type="button" class="btn btn-primary">保存保底域名与端口</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- ==================== Tab 5: Logs & Panel Settings ==================== -->
+    <section id="pane-settings" class="section-stack hidden">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">基础运行与错误日志</h2>
+            <p class="card-desc">展示面板、Xray 与 Cloudflared 近期日志，便于排查连接或隧道状态。</p>
+          </div>
+          <div class="card-actions">
+            <select id="log-source-filter" style="width:auto;padding:5px 10px;font-size:12.5px;">
+              <option value="all">全部来源</option>
+              <option value="cloudflared">Cloudflared</option>
+              <option value="xray">Xray</option>
+              <option value="panel">面板系统</option>
+            </select>
+            <button id="btn-refresh-logs" type="button" class="btn btn-sm">刷新日志</button>
+            <button id="btn-clear-logs" type="button" class="btn btn-sm">清空</button>
+          </div>
+        </div>
+
+        <div id="log-console" class="log-viewer mono" aria-live="polite">
+          <div class="empty-placeholder">暂无日志输出</div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">面板监听、穿透访问与账号安全</h2>
+            <p class="card-desc">面板与客户端订阅共用同一固定端口，修改端口后浏览器会自动跳转至新端口。</p>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field span-2">
+            <div class="switch-row">
+              <div class="switch-meta">
+                <span class="switch-title">允许通过 Argo 隧道域名访问 Web 管理面板</span>
+                <span class="switch-sub">开启后可通过免开端口的 HTTPS 隧道域名登录本后台；关闭后隧道域名仅响应节点流量与订阅拉取，访问根路径返回 404</span>
+              </div>
+              <label class="toggle">
+                <input id="set-allow-argo-panel" type="checkbox" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="set-listen-port">面板与订阅固定监听端口</label>
+            <input id="set-listen-port" type="number" min="1" max="65535" class="mono" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="set-host-override">订阅直连 IP / 域名覆盖 (留空自动检测)</label>
+            <input id="set-host-override" type="text" class="mono" placeholder="留空则使用自动检测的本机公网 IP" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="set-admin-user">管理员用户名</label>
+            <input id="set-admin-user" type="text" autocomplete="username" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="set-cur-password">当前登录密码 (修改密码时必填)</label>
+            <input id="set-cur-password" type="password" autocomplete="current-password" placeholder="不修改密码请留空" />
+          </div>
+
+          <div class="field span-2">
+            <label class="field-label" for="set-new-password">新登录密码 (至少 6 位，留空保持原密码不变)</label>
+            <input id="set-new-password" type="password" autocomplete="new-password" placeholder="输入新密码以更新登录凭据" />
+          </div>
+        </div>
+
+        <div class="footer-bar">
+          <button id="btn-save-settings" type="button" class="btn btn-primary">保存面板设置</button>
+        </div>
+      </article>
+    </section>
+  </div>
+
+  <!-- ==================== QR Code Modal ==================== -->
+  <div id="qr-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title">
+    <div class="modal-dialog">
+      <h3 id="qr-modal-title" class="modal-title">扫码导入</h3>
+      <div id="qr-canvas-box" class="qr-frame"></div>
+      <div id="qr-modal-uri" class="modal-uri mono"></div>
+      <div class="card-actions" style="justify-content:center;">
+        <button id="btn-qr-copy" type="button" class="btn btn-primary btn-sm">复制链接</button>
+        <button id="btn-qr-close" type="button" class="btn btn-sm">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-stack" aria-live="polite"></div>
+
+  <script src="/qrcode.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

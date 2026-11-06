@@ -1,11 +1,13 @@
-name: Build and Release Suoha Client
+name: Build and Release Suoha Panel & Client
 
 on:
   push:
     branches:
       - main
     paths:
+      - "panel/**"
       - "client/**"
+      - "suoha.sh"
       - ".github/workflows/release-client.yml"
     tags:
       - "v*"
@@ -15,8 +17,74 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build (${{ matrix.goos }}-${{ matrix.arch_label }})
+  test:
+    name: Unit Tests (Panel & Client)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run panel tests
+        working-directory: panel
+        run: go test -v ./...
+
+      - name: Run client tests
+        working-directory: client
+        run: go test -v ./...
+
+  build-panel:
+    name: Build Panel (linux-${{ matrix.arch_label }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            arch_label: amd64
+          - goarch: arm64
+            arch_label: arm64
+          - goarch: arm
+            goarm: "7"
+            arch_label: armv7
+          - goarch: "386"
+            arch_label: "386"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build suoha-panel binary
+        working-directory: panel
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          mkdir -p ../dist
+          OUTPUT="../dist/suoha-panel-linux-${{ matrix.arch_label }}"
+          go build -trimpath -ldflags="-s -w" -o "$OUTPUT" .
+          sha256sum "$OUTPUT" | awk '{print $1 "  " $2}' | sed 's|../dist/||' > "${OUTPUT}.sha256"
+
+      - name: Upload panel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: suoha-panel-linux-${{ matrix.arch_label }}
+          path: dist/*
+
+  build-client:
+    name: Build Client (${{ matrix.goos }}-${{ matrix.arch_label }})
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -55,7 +123,6 @@ jobs:
             goarch: arm64
             arch_label: arm64
             ext: ""
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -65,12 +132,7 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Run unit tests
-        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        working-directory: client
-        run: go test -v ./...
-
-      - name: Build binary
+      - name: Build suoha-client binary
         working-directory: client
         env:
           CGO_ENABLED: "0"
@@ -83,7 +145,7 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o "$OUTPUT" .
           sha256sum "$OUTPUT" | awk '{print $1 "  " $2}' | sed 's|../dist/||' > "${OUTPUT}.sha256"
 
-      - name: Upload artifact
+      - name: Upload client artifact
         uses: actions/upload-artifact@v4
         with:
           name: suoha-client-${{ matrix.goos }}-${{ matrix.arch_label }}
@@ -91,7 +153,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build-panel, build-client]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -113,6 +175,6 @@ jobs:
             gh release upload "$TAG_NAME" artifacts/* --clobber
           else
             gh release create "$TAG_NAME" artifacts/* \
-              --title "Suoha Preferred IP Client ($TAG_NAME)" \
-              --notes "Cross-platform background Cloudflare preferred IP speedtest & auto-upload client for New-Suoha."
+              --title "New-Suoha Web Panel & Preferred IP Client ($TAG_NAME)" \
+              --notes "Multi-arch static binaries for suoha-panel (Linux Web Control Panel) and suoha-client (Cross-platform Preferred IP Speedtest Uploader)."
           fi

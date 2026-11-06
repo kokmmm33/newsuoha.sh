@@ -1,0 +1,9 @@
+dist/
+artifacts/
+cfst/
+suoha-panel
+suoha-panel-*
+suoha-client
+suoha-client-*
+*.exe
+*.sha256
