@@ -152,6 +152,19 @@ func TestSubscriptionGeneration(t *testing.T) {
 	if !strings.Contains(bundle.ClashYAML, "type: url-test") || !strings.Contains(bundle.ClashYAML, "AUTO-优选自动测速") {
 		t.Errorf("clash.yaml missing AUTO url-test group:\n%s", bundle.ClashYAML)
 	}
+	for _, expected := range []string{
+		"rule-providers:",
+		"format: mrs",
+		"AI-人工智能",
+		"Streaming-流媒体",
+		"RULE-SET,ai_domain,AI-人工智能",
+		"RULE-SET,cn_ip,CN-国内直连,no-resolve",
+		"MATCH,FINAL-漏网之鱼",
+	} {
+		if !strings.Contains(bundle.ClashYAML, expected) {
+			t.Errorf("clash.yaml missing smart routing fragment %q", expected)
+		}
+	}
 	if bundle.ArgoSubURL == "" || !strings.HasPrefix(bundle.ArgoSubURL, "https://quick-test.trycloudflare.com/") {
 		t.Errorf("expected HTTPS Argo subscription URL, got %q", bundle.ArgoSubURL)
 	}

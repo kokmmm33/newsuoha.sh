@@ -147,14 +147,7 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 		return n
 	}
 
-	clashLines := []string{
-		"port: 7890",
-		"socks-port: 7891",
-		"allow-lan: false",
-		"mode: rule",
-		"log-level: info",
-		"proxies:",
-	}
+	var proxyLines []string
 
 	// VLESS-WS nodes (only emitted if VLESS is enabled AND tunnel domain is ready)
 	if proto.VLESSEnabled && argoVL != "" {
@@ -180,7 +173,7 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 			})
 			nodesLines = append(nodesLines, uri)
 			proxyNames = append(proxyNames, pname)
-			clashLines = append(clashLines,
+			proxyLines = append(proxyLines,
 				fmt.Sprintf("  - name: %s", yamlQuote(pname)),
 				"    type: vless",
 				fmt.Sprintf("    server: %s", yamlQuote(cleanRawHost(t.Host))),
@@ -189,10 +182,11 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 				"    cipher: auto",
 				"    tls: true",
 				"    udp: true",
+				"    client-fingerprint: chrome",
 				fmt.Sprintf("    servername: %s", yamlQuote(argoVL)),
 				"    network: ws",
 				"    ws-opts:",
-				fmt.Sprintf("      path: /%s", proto.VLESSPath),
+				fmt.Sprintf("      path: %s", yamlQuote("/"+proto.VLESSPath)),
 				"      headers:",
 				fmt.Sprintf("        Host: %s", yamlQuote(argoVL)),
 			)
@@ -223,17 +217,18 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 			})
 			nodesLines = append(nodesLines, uri)
 			proxyNames = append(proxyNames, pname)
-			clashLines = append(clashLines,
+			proxyLines = append(proxyLines,
 				fmt.Sprintf("  - name: %s", yamlQuote(pname)),
 				"    type: trojan",
 				fmt.Sprintf("    server: %s", yamlQuote(cleanRawHost(t.Host))),
 				fmt.Sprintf("    port: %d", t.Port),
 				fmt.Sprintf("    password: %s", yamlQuote(proto.UUID)),
 				"    udp: true",
+				"    client-fingerprint: chrome",
 				fmt.Sprintf("    sni: %s", yamlQuote(argoTR)),
 				"    network: ws",
 				"    ws-opts:",
-				fmt.Sprintf("      path: /%s", proto.TrojanPath),
+				fmt.Sprintf("      path: %s", yamlQuote("/"+proto.TrojanPath)),
 				"      headers:",
 				fmt.Sprintf("        Host: %s", yamlQuote(argoTR)),
 			)
@@ -256,7 +251,7 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 		})
 		nodesLines = append(nodesLines, ssURI)
 		proxyNames = append(proxyNames, pname)
-		clashLines = append(clashLines,
+		proxyLines = append(proxyLines,
 			fmt.Sprintf("  - name: %s", yamlQuote(pname)),
 			"    type: ss",
 			fmt.Sprintf("    server: %s", yamlQuote(ipv6Clean)),
@@ -267,53 +262,12 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 		)
 	}
 
-	if len(proxyNames) == 0 {
-		clashLines = append(clashLines,
-			"proxy-groups:",
-			"  - name: PROXY",
-			"    type: select",
-			"    proxies:",
-			"      - DIRECT",
-		)
-	} else {
-		autoGroup := "AUTO-优选自动测速"
-		clashLines = append(clashLines,
-			"proxy-groups:",
-			"  - name: PROXY",
-			"    type: select",
-			"    proxies:",
-			fmt.Sprintf("      - %s", yamlQuote(autoGroup)),
-		)
-		for _, pn := range proxyNames {
-			clashLines = append(clashLines, fmt.Sprintf("      - %s", yamlQuote(pn)))
-		}
-		clashLines = append(clashLines, "      - DIRECT")
-
-		clashLines = append(clashLines,
-			fmt.Sprintf("  - name: %s", yamlQuote(autoGroup)),
-			"    type: url-test",
-			"    url: http://www.gstatic.com/generate_204",
-			"    interval: 300",
-			"    tolerance: 50",
-			"    proxies:",
-		)
-		for _, pn := range proxyNames {
-			clashLines = append(clashLines, fmt.Sprintf("      - %s", yamlQuote(pn)))
-		}
-	}
-
-	clashLines = append(clashLines,
-		"rules:",
-		"  - MATCH,PROXY",
-		"",
-	)
-
 	var nodesContent string
 	if len(nodesLines) > 0 {
 		nodesContent = strings.Join(nodesLines, "\n") + "\n"
 	}
 	subB64 := base64.StdEncoding.EncodeToString([]byte(nodesContent))
-	clashContent := strings.Join(clashLines, "\n")
+	clashContent := buildClashYAML(proxyLines, proxyNames, cfg, rt)
 
 	// Subscription URLs
 	serverHost := strings.TrimSpace(proto.ServerHostOverride)
@@ -348,7 +302,7 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 ======================== 客户端订阅及导入链接 ========================
 直连通用订阅 (v2rayN / NekoBox / Shadowrocket):
   %s
-Clash / Mihomo 在线配置:
+Clash / Mihomo 智能分流配置 (内置 .mrs 规则集 / AUTO 测速 / 防 DNS 泄露):
   %s
 `, strings.TrimSpace(nodesContent), len(dynamicTargets), updatedAt, directSub, directClash)
 
@@ -356,7 +310,7 @@ Clash / Mihomo 在线配置:
 		summary += fmt.Sprintf(`
 Argo 免端口 HTTPS 通用订阅:
   %s
-Argo 免端口 HTTPS Clash 配置:
+Argo 免端口 HTTPS Clash / Mihomo 智能分流配置:
   %s
 `, argoSub, argoClash)
 	}

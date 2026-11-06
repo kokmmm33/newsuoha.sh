@@ -30,8 +30,8 @@
 * **可视化优选管理 + 本地测速客户端联动**：
   * 面板支持手动增删改、多行批量粘贴优选 IP / 优选域名、编辑保底公共优选域名，以及一键切换 Cloudflare TLS 端口（`443` / `2053` / `2083` / `2087` / `2096` / `8443`）。
   * 跨平台本地助手 **`suoha-client`** 定时直连测速并自动上报最优 IP，服务端实时重生成订阅。
-* **二维码扫码与增强 Clash 订阅**：
-  * 提供 Base64 通用订阅 (`sub.txt`) 与内置 `AUTO-优选自动测速` (`url-test`) 策略组的 Clash/Mihomo 配置 (`clash.yaml`)，支持订阅与单节点弹窗扫码、一键唤起客户端导入。
+* **二维码扫码与 Mihomo 智能分流订阅**：
+  * 提供 Base64 通用订阅 (`sub.txt`) 与开箱即用的 **Mihomo / Clash 智能分流配置 (`clash.yaml`)**：基于 MetaCubeX 二进制 `.mrs` 规则集 (`rule-providers`)，内置 `AUTO-优选自动测速` (`url-test`)、`FALLBACK-故障转移` 及 **AI / 流媒体 / YouTube / Google / 电报社交 / GitHub / 游戏平台 / Apple / Microsoft / 服务器运维 / 广告拦截 / 国内直连** 全场景分流策略组，自动对本地测速进程（`suoha-client-*` / `cfst`）强制直连防 TUN 劫持、对节点所属服务器 IP/面板域名提供防断连保护，并配合 `Fake-IP` + 国内外分流 DoH (`respect-rules`) + `Sniffer` 域名嗅探彻底杜绝 DNS 污染与泄露；支持订阅与单节点弹窗扫码、一键唤起客户端导入。
 
 ---
 
