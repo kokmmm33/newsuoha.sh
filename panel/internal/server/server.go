@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -346,6 +347,8 @@ func (h *Handler) serveAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleServiceAction(w, r)
 	case r.URL.Path == "/api/admin/protocols/apply" && r.Method == http.MethodPost:
 		h.handleProtocolsApply(w, r)
+	case r.URL.Path == "/api/admin/reality/scan" && r.Method == http.MethodPost:
+		h.handleRealityScan(w, r)
 	case r.URL.Path == "/api/admin/network/detect" && r.Method == http.MethodPost:
 		info := h.mgr.RefreshNetwork()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "network": info})
@@ -497,17 +500,23 @@ func (h *Handler) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			h.mgr.StopTunnel()
 			h.mgr.StopXray()
 		} else {
-			_, _ = h.store.UpdateConfig(func(d *config.PanelConfig) error {
-				d.Tunnel.Enabled = true
-				return nil
-			})
+			cur := h.store.GetConfig()
+			if !cur.Tunnel.Enabled && !cur.Protocols.RealityEnabled && !cur.Protocols.IPv6SSEnabled {
+				_, _ = h.store.UpdateConfig(func(d *config.PanelConfig) error {
+					d.Tunnel.Enabled = true
+					return nil
+				})
+			}
 			if err := h.mgr.ReloadXray(); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
-			if err := h.mgr.RestartTunnel(); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-				return
+			updated := h.store.GetConfig()
+			if updated.Tunnel.Enabled || updated.Tunnel.PanelQuickTunnel {
+				if err := h.mgr.RestartTunnel(); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+					return
+				}
 			}
 		}
 	}
@@ -524,6 +533,21 @@ func (h *Handler) handleProtocolsApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oldCfg := h.store.GetConfig()
+	if strings.TrimSpace(req.RealitySNI) != "" && !config.IsValidRealityDomain(req.RealitySNI) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Reality SNI 域名格式无效，请填写有效的域名 (例如 www.apple.com)"})
+		return
+	}
+	if strings.TrimSpace(req.RealityPrivateKey) == "" {
+		req.RealityPrivateKey = oldCfg.Protocols.RealityPrivateKey
+	} else if _, _, err := config.DeriveRealityPublicKey(req.RealityPrivateKey); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Reality 私钥格式无效 (需为 32 字节 Base64 编码的 X25519 私钥)"})
+		return
+	}
+	if req.RealityEnabled && req.RealityPort == oldCfg.ListenPort {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("Reality 监听端口 (%d) 不能与面板监听端口相同", req.RealityPort)})
+		return
+	}
+
 	newCfg, err := h.store.UpdateConfig(func(draft *config.PanelConfig) error {
 		draft.Protocols = req
 		return nil
@@ -534,7 +558,7 @@ func (h *Handler) handleProtocolsApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reload Xray without touching active cloudflared tunnels unless dual-tunnel local ports changed
-	if h.mgr.Status().XrayRunning || newCfg.Tunnel.Enabled || newCfg.Protocols.IPv6SSEnabled {
+	if h.mgr.Status().XrayRunning || newCfg.Tunnel.Enabled || newCfg.Protocols.IPv6SSEnabled || newCfg.Protocols.RealityEnabled {
 		if err := h.mgr.ReloadXray(); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -551,6 +575,38 @@ func (h *Handler) handleProtocolsApply(w http.ResponseWriter, r *http.Request) {
 
 	h.SyncStaticSubscriptions()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Handler) handleRealityScan(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode    string   `json:"mode"`    // "preset" | "neighbor" | "custom"
+		Domains []string `json:"domains"` // optional list of custom domains
+		Custom  string   `json:"custom"`  // optional comma/newline separated custom domains
+	}
+	if err := decodeJSONBody(r, &req, 64*1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "扫描请求参数无效"})
+		return
+	}
+
+	customList := append([]string(nil), req.Domains...)
+	if strings.TrimSpace(req.Custom) != "" {
+		customList = append(customList, supervisor.ParseCustomDomainInputs(req.Custom)...)
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "custom" && len(customList) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请输入至少一个需要检测的域名 (如 www.apple.com)"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 14*time.Second)
+	defer cancel()
+
+	report := h.mgr.ScanRealitySNI(ctx, mode, customList)
+	h.mgr.Logs().Add("panel", fmt.Sprintf("完成 Reality SNI 域名扫描 (模式: %s, 共检测 %d 个, 可用 %d 个)", report.Mode, report.Scanned, report.ValidCount))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"report": report,
+	})
 }
 
 func (h *Handler) handlePreferredSave(w http.ResponseWriter, r *http.Request) {
@@ -653,7 +709,7 @@ func (h *Handler) handleFallbacksSave(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleRotateCredential(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Target string `json:"target"` // "sub_uuid" | "client_token" | "node_uuid"
+		Target string `json:"target"` // "sub_uuid" | "client_token" | "node_uuid" | "reality_keys"
 	}
 	if err := decodeJSONBody(r, &req, 8*1024); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "参数无效"})
@@ -661,6 +717,7 @@ func (h *Handler) handleRotateCredential(w http.ResponseWriter, r *http.Request)
 	}
 
 	var newValue string
+	extraResp := map[string]any{"ok": true}
 	needXrayReload := false
 	_, err := h.store.UpdateConfig(func(draft *config.PanelConfig) error {
 		switch req.Target {
@@ -677,6 +734,20 @@ func (h *Handler) handleRotateCredential(w http.ResponseWriter, r *http.Request)
 			draft.Protocols.VLESSPath = "vl-" + short
 			draft.Protocols.TrojanPath = "tr-" + short
 			needXrayReload = true
+		case "reality_keys":
+			priv, pub, genErr := config.GenerateRealityKeyPair()
+			if genErr != nil {
+				return genErr
+			}
+			sid := config.RandomHex(4)
+			draft.Protocols.RealityPrivateKey = priv
+			draft.Protocols.RealityPublicKey = pub
+			draft.Protocols.RealityShortID = sid
+			newValue = pub
+			extraResp["private_key"] = priv
+			extraResp["public_key"] = pub
+			extraResp["short_id"] = sid
+			needXrayReload = true
 		default:
 			return fmt.Errorf("未知的重置类型: %s", req.Target)
 		}
@@ -691,7 +762,8 @@ func (h *Handler) handleRotateCredential(w http.ResponseWriter, r *http.Request)
 		_ = h.mgr.ReloadXray()
 	}
 	h.SyncStaticSubscriptions()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "value": newValue})
+	extraResp["value"] = newValue
+	writeJSON(w, http.StatusOK, extraResp)
 }
 
 func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {

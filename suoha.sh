@@ -355,6 +355,85 @@ do_uninstall() {
     ok "New-Suoha Web 面板及相关配置数据已全部卸载清理完毕。"
 }
 
+reality_submenu() {
+    while true; do
+        echo ""
+        echo "----------------------------------------------------------"
+        echo "     VLESS + Reality + XTLS-RPRX-Vision 直连节点管理      "
+        echo "----------------------------------------------------------"
+        echo " 1. 查看当前 Reality 节点状态与直连链接"
+        echo " 2. 一键开启 Reality 直连节点 (默认 Apple SNI: www.apple.com)"
+        echo " 3. 关闭 Reality 直连节点"
+        echo " 4. 服务器扫描检测可用 SNI 域名 (内置 Apple / 大厂优选池)"
+        echo " 5. 服务器扫描同网段 (/24) 邻近可用 SNI 域名"
+        echo " 6. 检测并设置其他自定义 SNI 域名"
+        echo " 7. 修改 Reality 公网监听端口 (TCP)"
+        echo " 8. 重新生成 Reality X25519 密钥对与 ShortID"
+        echo " 0. 返回主菜单"
+        echo "----------------------------------------------------------"
+        read -r -p "请选择操作 [0-8]: " r_choice
+
+        case "${r_choice:-0}" in
+            1)
+                echo ""
+                "$PANEL_BIN" reality -data-dir "$DATA_DIR" status
+                ;;
+            2)
+                read -r -p "输入监听端口 (直接回车保持当前/默认端口): " r_port
+                read -r -p "输入伪装 SNI 域名 (直接回车默认使用 www.apple.com): " r_sni
+                local args=("on")
+                [ -n "${r_port:-}" ] && args+=("$r_port")
+                [ -n "${r_sni:-}" ] && args+=("$r_sni")
+                if "$PANEL_BIN" reality -data-dir "$DATA_DIR" "${args[@]}"; then
+                    service_restart
+                    ok "Reality 直连节点已开启并完成服务热同步（请确认防火墙放行对应 TCP 端口）。"
+                fi
+                ;;
+            3)
+                if "$PANEL_BIN" reality -data-dir "$DATA_DIR" off; then
+                    service_restart
+                    ok "Reality 直连节点已关闭。"
+                fi
+                ;;
+            4)
+                "$PANEL_BIN" reality -data-dir "$DATA_DIR" scan preset
+                ;;
+            5)
+                "$PANEL_BIN" reality -data-dir "$DATA_DIR" scan neighbor
+                ;;
+            6)
+                read -r -p "请输入要使用的 SNI 域名 (例如 www.apple.com 或 itunes.apple.com): " custom_sni
+                if [ -n "${custom_sni:-}" ]; then
+                    "$PANEL_BIN" reality -data-dir "$DATA_DIR" scan "$custom_sni"
+                    if "$PANEL_BIN" reality -data-dir "$DATA_DIR" sni "$custom_sni"; then
+                        service_restart
+                        ok "新 SNI 域名已应用生效。"
+                    fi
+                fi
+                ;;
+            7)
+                read -r -p "请输入新的 Reality 监听端口号 (1-65535): " new_rport
+                if "$PANEL_BIN" reality -data-dir "$DATA_DIR" port "$new_rport"; then
+                    service_restart
+                    ok "Reality 监听端口已更新并重启生效。"
+                fi
+                ;;
+            8)
+                if "$PANEL_BIN" reality -data-dir "$DATA_DIR" rekey; then
+                    service_restart
+                    ok "Reality 密钥对与 ShortID 已重置，客户端更新订阅即可同步。"
+                fi
+                ;;
+            0)
+                return
+                ;;
+            *)
+                warn "请输入有效的编号 [0-8]"
+                ;;
+        esac
+    done
+}
+
 interactive_menu() {
     require_root
     while true; do
@@ -377,14 +456,15 @@ interactive_menu() {
         echo " 2. 重置面板管理员账号与密码"
         echo " 3. 修改面板与订阅共用监听端口"
         echo " 4. 开启 / 关闭 Argo 隧道穿透访问面板后台"
-        echo " 5. 重启面板服务"
-        echo " 6. 启动面板服务"
-        echo " 7. 停止面板服务"
-        echo " 8. 更新面板二进制内核 (保留配置)"
-        echo " 9. 彻底卸载面板与清理数据"
+        echo " 5. 管理 VLESS+Reality+Vision 直连节点 (开关/扫描/设置SNI)"
+        echo " 6. 重启面板服务"
+        echo " 7. 启动面板服务"
+        echo " 8. 停止面板服务"
+        echo " 9. 更新面板二进制内核 (保留配置)"
+        echo " 10. 彻底卸载面板与清理数据"
         echo " 0. 退出"
         echo "=========================================================="
-        read -r -p "请选择操作 [0-9]: " choice
+        read -r -p "请选择操作 [0-10]: " choice
 
         case "${choice:-0}" in
             1)
@@ -413,21 +493,24 @@ interactive_menu() {
                 fi
                 ;;
             5)
+                reality_submenu
+                ;;
+            6)
                 service_restart
                 ok "面板服务已重启。"
                 ;;
-            6)
+            7)
                 service_start
                 ok "面板服务已启动。"
                 ;;
-            7)
+            8)
                 service_stop
                 warn "面板服务已停止。"
                 ;;
-            8)
+            9)
                 do_update
                 ;;
-            9)
+            10)
                 do_uninstall
                 exit 0
                 ;;
@@ -435,7 +518,7 @@ interactive_menu() {
                 exit 0
                 ;;
             *)
-                warn "请输入有效的菜单编号 [0-9]"
+                warn "请输入有效的菜单编号 [0-10]"
                 ;;
         esac
     done
@@ -469,6 +552,20 @@ main() {
             "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$@"
             service_restart
             ;;
+        reality)
+            require_root
+            shift
+            local r_act="${1:-status}"
+            "$PANEL_BIN" reality -data-dir "$DATA_DIR" "$@"
+            case "$r_act" in
+                on|enable|off|disable|sni|set-sni|domain|port|set-port|rekey|rotate)
+                    if [ "$(service_status_text)" = "running" ]; then
+                        service_restart
+                        ok "面板与 Xray 服务已重启同步生效。"
+                    fi
+                    ;;
+            esac
+            ;;
         start)
             require_root
             service_start
@@ -495,7 +592,7 @@ main() {
             fi
             ;;
         *)
-            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <on|off>|start|stop|restart|update|uninstall]"
+            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <on|off>|reality <status|on|off|sni|port|rekey|scan>|start|stop|restart|update|uninstall]"
             exit 1
             ;;
     esac

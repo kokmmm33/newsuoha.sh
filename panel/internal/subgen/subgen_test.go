@@ -1,6 +1,7 @@
 package subgen
 
 import (
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -190,6 +191,96 @@ func TestSmartRoutingClashYAMLZeroNodes(t *testing.T) {
 	}
 
 	verifyClashStructure(t, yml, false)
+}
+
+func TestRealityDirectStandaloneAndCoexistence(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := config.LoadOrInit(tmp, config.LegacyPaths{}, false)
+	if err != nil {
+		t.Fatalf("LoadOrInit failed: %v", err)
+	}
+
+	// Default SNI must be Apple domain www.apple.com
+	initCfg := store.GetConfig()
+	if initCfg.Protocols.RealitySNI != "www.apple.com" {
+		t.Fatalf("expected default RealitySNI 'www.apple.com', got %q", initCfg.Protocols.RealitySNI)
+	}
+
+	// 1. Standalone VLESS + Reality + XTLS-RPRX-Vision (no Argo tunnel)
+	cfgStandalone, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+		d.Tunnel.Enabled = false
+		d.Protocols.RealityEnabled = true
+		d.Protocols.RealityPort = 24443
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	standalone := Generate(cfgStandalone, store.GetPreferred(), RuntimeState{
+		ServerIP: "198.51.100.77",
+	})
+	if len(standalone.Nodes) != 1 {
+		t.Fatalf("expected 1 standalone Reality node, got %d", len(standalone.Nodes))
+	}
+	rNode := standalone.Nodes[0]
+	if rNode.Protocol != "reality" {
+		t.Errorf("expected protocol 'reality', got %q", rNode.Protocol)
+	}
+	for _, frag := range []string{
+		"vless://" + cfgStandalone.Protocols.UUID + "@198.51.100.77:24443?",
+		"flow=xtls-rprx-vision",
+		"security=reality",
+		"sni=www.apple.com",
+		"fp=chrome",
+		"pbk=" + cfgStandalone.Protocols.RealityPublicKey,
+		"sid=" + cfgStandalone.Protocols.RealityShortID,
+		"type=tcp",
+	} {
+		if !strings.Contains(rNode.URI, frag) {
+			t.Errorf("Reality URI missing %q:\n%s", frag, rNode.URI)
+		}
+	}
+	for _, ymlFrag := range []string{
+		"type: vless",
+		"flow: xtls-rprx-vision",
+		`servername: "www.apple.com"`,
+		"reality-opts:",
+		fmt.Sprintf("public-key: %q", cfgStandalone.Protocols.RealityPublicKey),
+		fmt.Sprintf("short-id: %q", cfgStandalone.Protocols.RealityShortID),
+		"IP-CIDR,198.51.100.77/32,Server-服务器运维,no-resolve",
+	} {
+		if !strings.Contains(standalone.ClashYAML, ymlFrag) {
+			t.Errorf("standalone ClashYAML missing %q:\n%s", ymlFrag, standalone.ClashYAML)
+		}
+	}
+	verifyClashStructure(t, standalone.ClashYAML, true)
+
+	// 2. Coexistence with custom SNI + Argo VLESS-WS + Trojan-WS + IPv6 SS
+	cfgCoexist, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+		d.Tunnel.Enabled = true
+		d.Protocols.RealityEnabled = true
+		d.Protocols.RealitySNI = "itunes.apple.com"
+		d.Protocols.RealityFingerprint = "safari"
+		d.Protocols.IPv6SSEnabled = true
+		d.Protocols.IPv6Addr = "2001:db8::99"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coexist := Generate(cfgCoexist, store.GetPreferred(), RuntimeState{
+		ArgoVL:   "vl-coexist.trycloudflare.com",
+		ArgoTR:   "tr-coexist.trycloudflare.com",
+		ServerIP: "198.51.100.77",
+	})
+	if len(coexist.Nodes) < 4 {
+		t.Fatalf("expected Reality + VLESS + Trojan + SS coexistence nodes, got %d", len(coexist.Nodes))
+	}
+	if coexist.Nodes[0].Protocol != "reality" || !strings.Contains(coexist.Nodes[0].URI, "sni=itunes.apple.com") {
+		t.Errorf("expected first node to be Reality with custom SNI itunes.apple.com, got %+v", coexist.Nodes[0])
+	}
+	verifyClashStructure(t, coexist.ClashYAML, true)
 }
 
 func verifyClashStructure(t *testing.T, yml string, expectAutoGroups bool) {

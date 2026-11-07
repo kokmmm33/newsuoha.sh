@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,10 +18,14 @@ const (
 	LegacySubUUIDFile  = "/etc/suoha_sub_uuid"
 	LegacySubTokenFile = "/etc/suoha_sub_token"
 	LegacyWebDir       = "/var/www/suoha_sub"
+
+	DefaultRealitySNI = "www.apple.com"
 )
 
 var (
 	hostOrIPRegex = regexp.MustCompile(`^[a-zA-Z0-9.:-]+$`)
+	domainOnlyRe  = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$`)
+	hexExcludeRe  = regexp.MustCompile(`[^0-9a-fA-F]+`)
 	labelCleanRe  = regexp.MustCompile(`[\r\n\t#"'\\]+`)
 	spaceRunRe    = regexp.MustCompile(`\s+`)
 )
@@ -36,7 +41,7 @@ type TunnelConfig struct {
 	CustomDomain     string `json:"custom_domain"`
 }
 
-// ProtocolConfig defines the classic 3 protocols: VLESS-WS, Trojan-WS, and IPv6 Shadowsocks.
+// ProtocolConfig defines supported protocols: VLESS-WS, Trojan-WS, VLESS-Reality-Vision direct, and IPv6 Shadowsocks direct.
 type ProtocolConfig struct {
 	NodeTag            string `json:"node_tag"`
 	UUID               string `json:"uuid"`
@@ -46,6 +51,13 @@ type ProtocolConfig struct {
 	TrojanEnabled      bool   `json:"trojan_enabled"`
 	TrojanPath         string `json:"trojan_path"`
 	TrojanLocalPort    int    `json:"trojan_local_port"`
+	RealityEnabled     bool   `json:"reality_enabled"`
+	RealityPort        int    `json:"reality_port"`
+	RealitySNI         string `json:"reality_sni"`
+	RealityPrivateKey  string `json:"reality_private_key"`
+	RealityPublicKey   string `json:"reality_public_key"`
+	RealityShortID     string `json:"reality_short_id"`
+	RealityFingerprint string `json:"reality_fingerprint"`
 	IPv6SSEnabled      bool   `json:"ipv6_ss_enabled"`
 	IPv6Addr           string `json:"ipv6_addr"`
 	SSPort             int    `json:"ss_port"`
@@ -141,7 +153,11 @@ func LoadOrInit(dataDir string, legacy LegacyPaths, syncLegacy bool) (*Store, er
 		if err := json.Unmarshal(raw, &s.cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", cfgPath, err)
 		}
+		needPersistUpgrade := strings.TrimSpace(s.cfg.Protocols.RealityPrivateKey) == ""
 		s.normalizeLocked()
+		if needPersistUpgrade {
+			_ = s.saveConfigLocked()
+		}
 	} else {
 		if err := s.initFreshWithMigrationLocked(); err != nil {
 			return nil, err
@@ -258,6 +274,11 @@ func (s *Store) initFreshWithMigrationLocked() error {
 	nodeUUID := NewUUID()
 	shortID := strings.Split(nodeUUID, "-")[0]
 
+	realityPriv, realityPub, err := GenerateRealityKeyPair()
+	if err != nil {
+		return err
+	}
+
 	cfg := PanelConfig{
 		ListenPort:     RandomPortInRange(25000, 34999),
 		AdminUser:      "admin",
@@ -273,19 +294,26 @@ func (s *Store) initFreshWithMigrationLocked() error {
 			PanelQuickTunnel: false,
 		},
 		Protocols: ProtocolConfig{
-			NodeTag:         "Argo_Node",
-			UUID:            nodeUUID,
-			VLESSEnabled:    true,
-			VLESSPath:       "vl-" + shortID,
-			VLESSLocalPort:  RandomPortInRange(18000, 19900),
-			TrojanEnabled:   true,
-			TrojanPath:      "tr-" + shortID,
-			TrojanLocalPort: 0,
-			IPv6SSEnabled:   false,
-			SSPort:          RandomPortInRange(30000, 39999),
-			SSPassword:      RandomHex(8),
-			SSMethod:        "aes-128-gcm",
-			TLSDefaultPort:  443,
+			NodeTag:            "Argo_Node",
+			UUID:               nodeUUID,
+			VLESSEnabled:       true,
+			VLESSPath:          "vl-" + shortID,
+			VLESSLocalPort:     RandomPortInRange(18000, 19900),
+			TrojanEnabled:      true,
+			TrojanPath:         "tr-" + shortID,
+			TrojanLocalPort:    0,
+			RealityEnabled:     false,
+			RealityPort:        RandomPortInRange(20000, 24999),
+			RealitySNI:         DefaultRealitySNI,
+			RealityPrivateKey:  realityPriv,
+			RealityPublicKey:   realityPub,
+			RealityShortID:     RandomHex(4),
+			RealityFingerprint: "chrome",
+			IPv6SSEnabled:      false,
+			SSPort:             RandomPortInRange(30000, 39999),
+			SSPassword:         RandomHex(8),
+			SSMethod:           "aes-128-gcm",
+			TLSDefaultPort:     443,
 		},
 		FallbackDomains: DefaultFallbackDomains(),
 	}
@@ -411,6 +439,30 @@ func (s *Store) normalizeLocked() {
 	if strings.TrimSpace(s.cfg.Protocols.SSMethod) == "" {
 		s.cfg.Protocols.SSMethod = "aes-128-gcm"
 	}
+
+	// Normalize VLESS + Reality + Vision settings
+	if s.cfg.Protocols.RealityPort < 1 || s.cfg.Protocols.RealityPort > 65535 ||
+		s.cfg.Protocols.RealityPort == s.cfg.ListenPort ||
+		s.cfg.Protocols.RealityPort == s.cfg.Protocols.VLESSLocalPort ||
+		s.cfg.Protocols.RealityPort == s.cfg.Protocols.TrojanLocalPort ||
+		s.cfg.Protocols.RealityPort == s.cfg.Protocols.SSPort {
+		p := 24443
+		for p == s.cfg.ListenPort || p == s.cfg.Protocols.VLESSLocalPort || p == s.cfg.Protocols.TrojanLocalPort || p == s.cfg.Protocols.SSPort {
+			p++
+		}
+		s.cfg.Protocols.RealityPort = p
+	}
+	s.cfg.Protocols.RealitySNI = SanitizeRealitySNI(s.cfg.Protocols.RealitySNI)
+	if normPriv, pub, err := DeriveRealityPublicKey(s.cfg.Protocols.RealityPrivateKey); err == nil {
+		s.cfg.Protocols.RealityPrivateKey = normPriv
+		s.cfg.Protocols.RealityPublicKey = pub
+	} else if genPriv, genPub, err := GenerateRealityKeyPair(); err == nil {
+		s.cfg.Protocols.RealityPrivateKey = genPriv
+		s.cfg.Protocols.RealityPublicKey = genPub
+	}
+	s.cfg.Protocols.RealityShortID = SanitizeRealityShortID(s.cfg.Protocols.RealityShortID)
+	s.cfg.Protocols.RealityFingerprint = SanitizeRealityFingerprint(s.cfg.Protocols.RealityFingerprint)
+
 	if strings.TrimSpace(s.cfg.Protocols.NodeTag) == "" {
 		s.cfg.Protocols.NodeTag = "Argo_Node"
 	}
@@ -642,3 +694,62 @@ func isValidSafeToken(s string) bool {
 	}
 	return regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(s)
 }
+
+// ExtractRealityDomain strips scheme, path, and optional :port from user-entered SNI input.
+func ExtractRealityDomain(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if idx := strings.IndexAny(s, "/?#"); idx >= 0 {
+		s = s[:idx]
+	}
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	return strings.Trim(s, ". ")
+}
+
+// IsValidRealityDomain checks whether a string is a valid non-IP FQDN suitable for TLS SNI.
+func IsValidRealityDomain(raw string) bool {
+	d := ExtractRealityDomain(raw)
+	if d == "" || len(d) > 253 || net.ParseIP(d) != nil {
+		return false
+	}
+	return domainOnlyRe.MatchString(d)
+}
+
+// SanitizeRealitySNI normalizes user SNI input and falls back to DefaultRealitySNI ("www.apple.com").
+func SanitizeRealitySNI(raw string) string {
+	d := ExtractRealityDomain(raw)
+	if !IsValidRealityDomain(d) {
+		return DefaultRealitySNI
+	}
+	return d
+}
+
+// SanitizeRealityShortID ensures shortId is a lowercase even-length hex string (2-16 chars).
+func SanitizeRealityShortID(raw string) string {
+	s := strings.ToLower(hexExcludeRe.ReplaceAllString(strings.TrimSpace(raw), ""))
+	if len(s) > 16 {
+		s = s[:16]
+	}
+	if len(s)%2 == 1 {
+		s = "0" + s
+	}
+	if s == "" {
+		return RandomHex(4)
+	}
+	return s
+}
+
+// SanitizeRealityFingerprint validates uTLS client fingerprint names.
+func SanitizeRealityFingerprint(raw string) string {
+	fp := strings.ToLower(strings.TrimSpace(raw))
+	switch fp {
+	case "chrome", "safari", "ios", "firefox", "edge", "android", "360", "qq", "random", "randomized":
+		return fp
+	default:
+		return "chrome"
+	}
+}
+

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,7 @@ type StatusSnapshot struct {
 	TunnelRunning bool   `json:"tunnel_running"`
 	TunnelState   string `json:"tunnel_state"` // "stopped" | "starting" | "running" | "error"
 	TunnelError   string `json:"tunnel_error,omitempty"`
+	RealityActive bool   `json:"reality_active"`
 	IPv6SSActive  bool   `json:"ipv6_ss_active"`
 	ArgoVL        string `json:"argo_vl"`
 	ArgoTR        string `json:"argo_tr"`
@@ -95,8 +97,8 @@ func (m *Manager) InitNetworkAndAutostart() {
 
 	m.triggerSync()
 
-	// If any protocol is active and tunnel was previously enabled (or IPv6 SS is enabled), auto-start Xray
-	if cfg.Tunnel.Enabled || cfg.Protocols.IPv6SSEnabled {
+	// If any protocol is active and tunnel/direct node was previously enabled, auto-start Xray
+	if cfg.Tunnel.Enabled || cfg.Protocols.IPv6SSEnabled || cfg.Protocols.RealityEnabled {
 		go func() {
 			if err := m.ReloadXray(); err != nil {
 				m.logs.Add("panel", fmt.Sprintf("启动 Xray 失败: %v", err))
@@ -131,6 +133,18 @@ func (m *Manager) RefreshNetwork() NetworkInfo {
 	return info
 }
 
+// ScanRealitySNI scans preset, neighbor /24, or custom Reality SNI domains from this server.
+func (m *Manager) ScanRealitySNI(ctx context.Context, mode string, customDomains []string) RealityScanReport {
+	m.mu.RLock()
+	srvIP := m.serverIP
+	m.mu.RUnlock()
+	return ScanRealityDomains(ctx, RealityScanOptions{
+		Mode:          mode,
+		CustomDomains: customDomains,
+		ServerIP:      srvIP,
+	})
+}
+
 func (m *Manager) Status() StatusSnapshot {
 	cfg := m.store.GetConfig()
 	m.mu.RLock()
@@ -141,6 +155,7 @@ func (m *Manager) Status() StatusSnapshot {
 		TunnelRunning: m.tunRunning,
 		TunnelState:   m.tunState,
 		TunnelError:   m.tunErr,
+		RealityActive: m.xrayRunning && cfg.Protocols.RealityEnabled,
 		IPv6SSActive:  m.xrayRunning && cfg.Protocols.IPv6SSEnabled && strings.TrimSpace(cfg.Protocols.IPv6Addr) != "",
 		ArgoVL:        m.argoVL,
 		ArgoTR:        m.argoTR,
@@ -186,7 +201,7 @@ func (m *Manager) ReloadXray() error {
 	cfg := m.store.GetConfig()
 	proto := cfg.Protocols
 
-	if !proto.VLESSEnabled && !proto.TrojanEnabled && !proto.IPv6SSEnabled {
+	if !proto.VLESSEnabled && !proto.TrojanEnabled && !proto.IPv6SSEnabled && !proto.RealityEnabled {
 		m.StopXray()
 		m.triggerSync()
 		return nil
@@ -237,7 +252,8 @@ func (m *Manager) ReloadXray() error {
 	return nil
 }
 
-func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
+// BuildXrayConfig constructs the Xray-core JSON configuration map for all enabled protocols.
+func BuildXrayConfig(proto config.ProtocolConfig) map[string]any {
 	var inbounds []map[string]any
 
 	if proto.VLESSEnabled {
@@ -281,6 +297,43 @@ func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
 		})
 	}
 
+	if proto.RealityEnabled && strings.TrimSpace(proto.RealityPrivateKey) != "" {
+		sni := config.SanitizeRealitySNI(proto.RealitySNI)
+		shortID := config.SanitizeRealityShortID(proto.RealityShortID)
+		inbounds = append(inbounds, map[string]any{
+			"tag":      "vless-reality-in",
+			"port":     proto.RealityPort,
+			"listen":   bestPublicListenAddr(),
+			"protocol": "vless",
+			"settings": map[string]any{
+				"decryption": "none",
+				"clients": []map[string]any{
+					{
+						"id":   proto.UUID,
+						"flow": "xtls-rprx-vision",
+					},
+				},
+			},
+			"streamSettings": map[string]any{
+				"network":  "tcp",
+				"security": "reality",
+				"realitySettings": map[string]any{
+					"show":        false,
+					"dest":        fmt.Sprintf("%s:443", sni),
+					"xver":        0,
+					"serverNames": []string{sni},
+					"privateKey":  proto.RealityPrivateKey,
+					"shortIds":    []string{shortID},
+				},
+			},
+			"sniffing": map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls", "quic"},
+				"routeOnly":    true,
+			},
+		})
+	}
+
 	if proto.IPv6SSEnabled && strings.TrimSpace(proto.IPv6Addr) != "" {
 		inbounds = append(inbounds, map[string]any{
 			"tag":      "ss-ipv6",
@@ -295,7 +348,7 @@ func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
 		})
 	}
 
-	xrayDoc := map[string]any{
+	return map[string]any{
 		"log": map[string]any{
 			"loglevel": "warning",
 		},
@@ -307,7 +360,10 @@ func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
 			},
 		},
 	}
+}
 
+func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
+	xrayDoc := BuildXrayConfig(proto)
 	raw, err := json.MarshalIndent(xrayDoc, "", "  ")
 	if err != nil {
 		return "", err
@@ -317,6 +373,15 @@ func (m *Manager) writeXrayConfig(proto config.ProtocolConfig) (string, error) {
 		return "", err
 	}
 	return cfgPath, nil
+}
+
+func bestPublicListenAddr() string {
+	ln, err := net.Listen("tcp", "[::]:0")
+	if err == nil {
+		_ = ln.Close()
+		return "::"
+	}
+	return "0.0.0.0"
 }
 
 func (m *Manager) superviseXrayLoop(ctx context.Context, xrayBin, cfgPath string) {

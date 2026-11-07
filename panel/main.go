@@ -48,6 +48,8 @@ func main() {
 		runSetPort(args)
 	case "argo-panel":
 		runArgoPanelToggle(args)
+	case "reality":
+		runReality(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -66,7 +68,9 @@ func printUsage() {
   suoha-panel info [-data-dir /opt/suoha]           查看当前面板地址、订阅链接与客户端命令
   suoha-panel reset-password [-user X] [-password Y] 重置管理员账号与登录密码(不指定密码则随机生成)
   suoha-panel set-port [-data-dir /opt/suoha] <端口> 修改面板与订阅共用固定监听端口
-  suoha-panel argo-panel <on|off>                   开启或关闭通过 Argo 隧道域名访问管理面板`)
+  suoha-panel argo-panel <on|off>                   开启或关闭通过 Argo 隧道域名访问管理面板
+  suoha-panel reality <status|on|off|sni|port|rekey|scan> [参数]
+                                                    管理 VLESS+Reality+Vision 直连节点与扫描可用 SNI 域名`)
 }
 
 func openStore(dataDir string, noLegacy bool) *config.Store {
@@ -330,6 +334,219 @@ func runArgoPanelToggle(args []string) {
 	}
 }
 
+func runReality(args []string) {
+	fs := flag.NewFlagSet("reality", flag.ExitOnError)
+	dataDir := fs.String("data-dir", defaultDataDir, "面板数据目录")
+	noLegacy := fs.Bool("no-legacy-sync", false, "禁用旧版文件同步")
+	_ = fs.Parse(args)
+
+	rest := fs.Args()
+	action := "status"
+	if len(rest) > 0 {
+		action = strings.ToLower(strings.TrimSpace(rest[0]))
+	}
+
+	store := openStore(*dataDir, *noLegacy)
+
+	switch action {
+	case "status", "info":
+		printRealitySummary(store)
+
+	case "on", "enable":
+		cur := store.GetConfig()
+		newPort := cur.Protocols.RealityPort
+		newSNI := cur.Protocols.RealitySNI
+		for _, tok := range rest[1:] {
+			tok = strings.TrimSpace(tok)
+			if tok == "" {
+				continue
+			}
+			if p, err := strconv.Atoi(tok); err == nil && p >= 1 && p <= 65535 {
+				newPort = p
+			} else if d := config.ExtractRealityDomain(tok); config.IsValidRealityDomain(d) {
+				newSNI = d
+			} else {
+				log.Fatalf("[错误] 无法识别的参数 %q (可指定端口号或有效 SNI 域名)", tok)
+			}
+		}
+		if newPort == cur.ListenPort {
+			log.Fatalf("[错误] Reality 端口 (%d) 不能与面板监听端口相同", newPort)
+		}
+		_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.Protocols.RealityEnabled = true
+			d.Protocols.RealityPort = newPort
+			d.Protocols.RealitySNI = newSNI
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 开启 Reality 失败: %v", err)
+		}
+		fmt.Printf("已开启 VLESS + Reality + XTLS-RPRX-Vision 直连节点 (端口 :%d | SNI: %s)\n", newPort, newSNI)
+		printRealitySummary(store)
+
+	case "off", "disable":
+		_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.Protocols.RealityEnabled = false
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 关闭 Reality 失败: %v", err)
+		}
+		fmt.Println("已关闭 VLESS + Reality + XTLS-RPRX-Vision 直连节点 (重启 suoha-panel 服务后生效)")
+
+	case "sni", "set-sni", "domain":
+		if len(rest) < 2 {
+			log.Fatalf("用法: suoha-panel reality sni <域名>  (默认 Apple 域名: %s)", config.DefaultRealitySNI)
+		}
+		domain := config.ExtractRealityDomain(rest[1])
+		if !config.IsValidRealityDomain(domain) {
+			log.Fatalf("[错误] 无效的 SNI 域名: %s (示例: www.apple.com)", rest[1])
+		}
+		_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.Protocols.RealitySNI = domain
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 保存 Reality SNI 域名失败: %v", err)
+		}
+		fmt.Printf("已将 Reality 伪装 SNI 域名设置为: %s (重启 suoha-panel 服务后生效)\n", domain)
+
+	case "port", "set-port":
+		if len(rest) < 2 {
+			log.Fatalf("用法: suoha-panel reality port <1-65535>")
+		}
+		p, err := strconv.Atoi(strings.TrimSpace(rest[1]))
+		if err != nil || p < 1 || p > 65535 {
+			log.Fatalf("[错误] 端口号无效: %s (范围 1-65535)", rest[1])
+		}
+		cur := store.GetConfig()
+		if p == cur.ListenPort {
+			log.Fatalf("[错误] Reality 监听端口 (%d) 不能与面板监听端口相同", p)
+		}
+		_, err = store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.Protocols.RealityPort = p
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 保存 Reality 端口失败: %v", err)
+		}
+		fmt.Printf("已将 Reality 监听端口更新为 %d (重启 suoha-panel 服务后生效，请放行防火墙端口)\n", p)
+
+	case "rekey", "rotate":
+		priv, pub, err := config.GenerateRealityKeyPair()
+		if err != nil {
+			log.Fatalf("[错误] 生成 Reality 密钥对失败: %v", err)
+		}
+		sid := config.RandomHex(4)
+		_, err = store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.Protocols.RealityPrivateKey = priv
+			d.Protocols.RealityPublicKey = pub
+			d.Protocols.RealityShortID = sid
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 保存新密钥对失败: %v", err)
+		}
+		fmt.Printf("已重新生成 Reality X25519 密钥对与 ShortID (PublicKey: %s | ShortID: %s)\n", pub, sid)
+
+	case "scan", "check":
+		mode := "preset"
+		var customDomains []string
+		for _, tok := range rest[1:] {
+			low := strings.ToLower(strings.TrimSpace(tok))
+			switch low {
+			case "", "preset", "-preset", "--preset":
+				mode = "preset"
+			case "neighbor", "-neighbor", "--neighbor", "subnet", "/24":
+				mode = "neighbor"
+			default:
+				parsed := supervisor.ParseCustomDomainInputs(tok)
+				if len(parsed) > 0 {
+					mode = "custom"
+					customDomains = append(customDomains, parsed...)
+				}
+			}
+		}
+
+		netInfo := supervisor.DetectNetwork()
+		fmt.Printf("正在从本机扫描检测支持 TLS 1.3 + HTTP/2 (h2) 的 Reality 可用域名 (模式: %s)...\n", mode)
+		ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
+		defer cancel()
+
+		report := supervisor.ScanRealityDomains(ctx, supervisor.RealityScanOptions{
+			Mode:          mode,
+			CustomDomains: customDomains,
+			ServerIP:      netInfo.ServerIP,
+			Port:          443,
+		})
+
+		fmt.Println("--------------------------------------------------------------------------------")
+		fmt.Printf("%-34s %-12s %-8s %s\n", "候选域名 (SNI)", "兼容性", "延迟", "解析 IP / 证书信息")
+		fmt.Println("--------------------------------------------------------------------------------")
+		for _, r := range report.Results {
+			status := "不兼容"
+			detail := r.Reason
+			if r.Valid {
+				status = "TLS1.3+H2"
+				detail = r.IP
+				if r.Issuer != "" {
+					detail += " (" + r.Issuer + ")"
+				}
+			}
+			lat := "-"
+			if r.LatencyMs > 0 {
+				lat = fmt.Sprintf("%dms", r.LatencyMs)
+			}
+			fmt.Printf("%-34s %-12s %-8s %s\n", r.Domain, status, lat, detail)
+		}
+		fmt.Println("--------------------------------------------------------------------------------")
+		fmt.Printf("扫描完成: 共检测 %d 个域名，可用 %d 个。", report.Scanned, report.ValidCount)
+		if report.Note != "" {
+			fmt.Printf(" (%s)", report.Note)
+		}
+		fmt.Println("\n提示: 可执行 `suoha reality sni <域名>` 切换伪装域名，或 `suoha reality on` 启用直连节点。")
+
+	default:
+		log.Fatalf("用法: suoha-panel reality <status|on|off|sni <域名>|port <端口>|rekey|scan [preset|neighbor|域名]>")
+	}
+}
+
+func printRealitySummary(store *config.Store) {
+	cfg := store.GetConfig()
+	proto := cfg.Protocols
+	netInfo := supervisor.DetectNetwork()
+	srvHost := netInfo.ServerIP
+	if srvHost == "" {
+		srvHost = netInfo.IPv6Addr
+	}
+	subOut := subgen.Generate(cfg, store.GetPreferred(), subgen.RuntimeState{
+		ServerIP: srvHost,
+	})
+
+	stText := "未启用 (可执行 `suoha reality on` 开启)"
+	if proto.RealityEnabled {
+		stText = "已启用 (XTLS-RPRX-Vision 直连)"
+	}
+
+	fmt.Println("==========================================================")
+	fmt.Println("        VLESS + Reality + XTLS-RPRX-Vision 节点信息       ")
+	fmt.Println("==========================================================")
+	fmt.Printf("启用状态       : %s\n", stText)
+	fmt.Printf("公网监听端口   : %d (TCP)\n", proto.RealityPort)
+	fmt.Printf("伪装 SNI 域名  : %s\n", proto.RealitySNI)
+	fmt.Printf("uTLS 客户端指纹: %s\n", proto.RealityFingerprint)
+	fmt.Printf("Public Key(pbk): %s\n", proto.RealityPublicKey)
+	fmt.Printf("Short ID (sid) : %s\n", proto.RealityShortID)
+	for _, n := range subOut.Nodes {
+		if n.Protocol == "reality" {
+			fmt.Println("----------------------------------------------------------")
+			fmt.Printf("直连节点链接   : %s\n", n.URI)
+			break
+		}
+	}
+	fmt.Println("==========================================================")
+}
+
 func printPanelSummary(store *config.Store, plainPwd string) {
 	cfg := store.GetConfig()
 	netInfo := supervisor.DetectNetwork()
@@ -347,6 +564,11 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 		argoHint = "已关闭 (仅开放直连 IP:Port 访问后台)"
 	}
 
+	realityHint := fmt.Sprintf("未启用 (默认 Apple SNI: %s，可在面板开启或执行 suoha reality on)", cfg.Protocols.RealitySNI)
+	if cfg.Protocols.RealityEnabled {
+		realityHint = fmt.Sprintf("已启用 (端口 :%d | SNI: %s | XTLS-RPRX-Vision)", cfg.Protocols.RealityPort, cfg.Protocols.RealitySNI)
+	}
+
 	fmt.Println("==========================================================")
 	fmt.Println("             New-Suoha Web 管理面板信息                   ")
 	fmt.Println("==========================================================")
@@ -358,6 +580,7 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 		fmt.Printf("管理员登录密码 : (已加密保存，遗忘可执行 suoha 重置密码)\n")
 	}
 	fmt.Printf("Argo 面板穿透  : %s\n", argoHint)
+	fmt.Printf("Reality 直连   : %s\n", realityHint)
 	fmt.Println("----------------------------------------------------------")
 	fmt.Printf("通用订阅直链   : %s/%s/sub.txt\n", baseURL, cfg.SubUUID)
 	fmt.Printf("Clash 配置直链 : %s/%s/clash.yaml\n", baseURL, cfg.SubUUID)

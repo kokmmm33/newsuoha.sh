@@ -3,6 +3,7 @@ package subgen
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ type RuntimeState struct {
 
 // NodeItem represents a single generated proxy node for UI display, copy, and QR rendering.
 type NodeItem struct {
-	Protocol string `json:"protocol"` // "vless" | "trojan" | "ss"
+	Protocol string `json:"protocol"` // "reality" | "vless" | "trojan" | "ss"
 	Name     string `json:"name"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
@@ -148,6 +149,56 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 	}
 
 	var proxyLines []string
+
+	// VLESS + Reality + XTLS-RPRX-Vision direct node
+	realityHost := resolveDirectHost(proto, rt)
+	if proto.RealityEnabled && realityHost != "" {
+		pubKey := strings.TrimSpace(proto.RealityPublicKey)
+		if pubKey == "" && strings.TrimSpace(proto.RealityPrivateKey) != "" {
+			_, pubKey, _ = config.DeriveRealityPublicKey(proto.RealityPrivateKey)
+		}
+		if pubKey != "" {
+			rPort := proto.RealityPort
+			if rPort < 1 || rPort > 65535 {
+				rPort = 24443
+			}
+			sni := config.SanitizeRealitySNI(proto.RealitySNI)
+			fp := config.SanitizeRealityFingerprint(proto.RealityFingerprint)
+			shortID := config.SanitizeRealityShortID(proto.RealityShortID)
+			hostURI := FormatHostForURL(realityHost)
+			pname := uniqueName(fmt.Sprintf("%s-Reality-直连-%d", nodeTag, rPort))
+
+			uri := fmt.Sprintf(
+				"vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp&headerType=none#%s",
+				proto.UUID, hostURI, rPort, sni, fp, url.QueryEscape(pubKey), shortID, url.PathEscape(pname),
+			)
+			nodes = append(nodes, NodeItem{
+				Protocol: "reality",
+				Name:     pname,
+				Host:     realityHost,
+				Port:     rPort,
+				URI:      uri,
+			})
+			nodesLines = append(nodesLines, uri)
+			proxyNames = append(proxyNames, pname)
+			proxyLines = append(proxyLines,
+				fmt.Sprintf("  - name: %s", yamlQuote(pname)),
+				"    type: vless",
+				fmt.Sprintf("    server: %s", yamlQuote(cleanRawHost(realityHost))),
+				fmt.Sprintf("    port: %d", rPort),
+				fmt.Sprintf("    uuid: %s", yamlQuote(proto.UUID)),
+				"    network: tcp",
+				"    tls: true",
+				"    udp: true",
+				"    flow: xtls-rprx-vision",
+				fmt.Sprintf("    servername: %s", yamlQuote(sni)),
+				fmt.Sprintf("    client-fingerprint: %s", yamlQuote(fp)),
+				"    reality-opts:",
+				fmt.Sprintf("      public-key: %s", yamlQuote(pubKey)),
+				fmt.Sprintf("      short-id: %s", yamlQuote(shortID)),
+			)
+		}
+	}
 
 	// VLESS-WS nodes (only emitted if VLESS is enabled AND tunnel domain is ready)
 	if proto.VLESSEnabled && argoVL != "" {
@@ -382,6 +433,23 @@ func writeSubDir(dir string, bundle Bundle) error {
 func cleanRawHost(h string) string {
 	h = strings.TrimSpace(h)
 	return strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+}
+
+func resolveDirectHost(proto config.ProtocolConfig, rt RuntimeState) string {
+	if override := cleanRawHost(proto.ServerHostOverride); override != "" && config.IsValidHostOrIP(override) {
+		return override
+	}
+	for _, cand := range []string{rt.ServerIP, proto.IPv6Addr} {
+		h := cleanRawHost(cand)
+		if h == "" || strings.EqualFold(h, "localhost") || !config.IsValidHostOrIP(h) {
+			continue
+		}
+		if ip := net.ParseIP(h); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+			continue
+		}
+		return h
+	}
+	return ""
 }
 
 func yamlQuote(s string) string {

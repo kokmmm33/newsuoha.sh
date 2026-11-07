@@ -37,6 +37,9 @@
     overview: null,
     prefDraft: [],
     fallbacksDraft: [],
+    realityScanRan: false,
+    realityScanning: false,
+    realityScanResults: [],
     formHydrated: false,
     pollTimer: null,
     currentQRText: ""
@@ -232,6 +235,17 @@
       $("chip-tunnel-text").textContent = "Argo: 未启动";
     }
 
+    // Reality Chip
+    const chipReality = $("chip-reality");
+    if (chipReality) {
+      chipReality.className = "status-chip " + (st.reality_active ? "is-running" : "");
+      $("chip-reality-text").textContent = st.reality_active
+        ? `Reality: :${cfg.protocols.reality_port}`
+        : cfg.protocols && cfg.protocols.reality_enabled
+        ? "Reality: 待机"
+        : "Reality: 未启用";
+    }
+
     // IPv6 SS Chip
     const chipSS = $("chip-ss");
     chipSS.className = "status-chip " + (st.ipv6_ss_active ? "is-running" : "");
@@ -241,7 +255,22 @@
       ? "IPv6 SS: 待机"
       : "IPv6 SS: 未启用";
 
-    // Domain Readouts
+    // Reality & Domain Readouts
+    const realityEl = $("val-reality-status");
+    if (realityEl) {
+      const proto = cfg.protocols || {};
+      const sni = proto.reality_sni || "www.apple.com";
+      const directHost = proto.server_host_override || st.server_ip || st.detected_ipv6 || "本机IP";
+      const hostFmt = directHost.includes(":") ? `[${directHost}]` : directHost;
+      if (st.reality_active) {
+        realityEl.textContent = `${hostFmt}:${proto.reality_port}  (SNI: ${sni} · XTLS-Vision 运行中)`;
+      } else if (proto.reality_enabled) {
+        realityEl.textContent = `${hostFmt}:${proto.reality_port}  (SNI: ${sni} · 待启动 Xray)`;
+      } else {
+        realityEl.textContent = `未启用 (默认 SNI: ${sni}，可在【协议配置】一键开启)`;
+      }
+    }
+
     $("val-argo-vl").textContent = st.argo_vl || (st.tunnel_state === "starting" ? "正在分配临时隧道域名..." : "暂未启动");
     $("val-argo-tr").textContent = st.argo_tr || (st.tunnel_state === "starting" ? "正在分配临时隧道域名..." : "暂未启动");
     $("val-argo-panel").textContent = st.argo_panel
@@ -274,6 +303,14 @@
     $("proto-node-tag").value = proto.node_tag || "Argo_Node";
     $("proto-uuid").value = proto.uuid || "";
     $("proto-tls-port").value = String(proto.tls_default_port || 443);
+    $("proto-reality-enabled").checked = !!proto.reality_enabled;
+    $("proto-reality-port").value = proto.reality_port || 24443;
+    $("proto-reality-fp").value = proto.reality_fingerprint || "chrome";
+    $("proto-reality-sni").value = proto.reality_sni || "www.apple.com";
+    $("proto-reality-sid").value = proto.reality_short_id || "";
+    $("proto-reality-pub").value = proto.reality_public_key || "";
+    $("proto-reality-priv").value = proto.reality_private_key || "";
+    highlightRealitySNIPill($("proto-reality-sni").value);
     $("proto-vless-enabled").checked = !!proto.vless_enabled;
     $("proto-vless-path").value = proto.vless_path || "";
     $("proto-vless-port").value = proto.vless_local_port || 18201;
@@ -337,7 +374,7 @@
     const tbody = $("nodes-tbody");
     if (!list.length) {
       tbody.innerHTML =
-        '<tr><td colspan="4" class="empty-placeholder">当前暂无可用节点，请在【隧道管理】启动隧道或在【协议配置】启用 IPv6 SS</td></tr>';
+        '<tr><td colspan="4" class="empty-placeholder">当前暂无可用节点，请在【协议配置】启用 VLESS-Reality 直连 / IPv6 SS 或在【隧道管理】启动 Argo 隧道</td></tr>';
       return;
     }
 
@@ -559,6 +596,177 @@
     document.querySelectorAll("#cf-port-pills .port-pill").forEach((el) => {
       el.classList.toggle("active", Number(el.getAttribute("data-cfport")) === Number(port));
     });
+  }
+
+  function highlightRealitySNIPill(sni) {
+    const target = String(sni || "").trim().toLowerCase();
+    document.querySelectorAll("#reality-sni-pills .port-pill").forEach((el) => {
+      el.classList.toggle("active", String(el.getAttribute("data-sni") || "").toLowerCase() === target);
+    });
+  }
+
+  async function saveProtocolsConfig(overridePatch) {
+    const btn = $("btn-save-protocols");
+    if (btn) btn.disabled = true;
+    try {
+      const curProto = (state.overview && state.overview.config && state.overview.config.protocols) || {};
+      const payload = Object.assign(
+        {
+          node_tag: $("proto-node-tag").value.trim(),
+          uuid: $("proto-uuid").value.trim(),
+          tls_default_port: Number($("proto-tls-port").value) || 443,
+          reality_enabled: $("proto-reality-enabled").checked,
+          reality_port: Number($("proto-reality-port").value) || 24443,
+          reality_sni: $("proto-reality-sni").value.trim() || "www.apple.com",
+          reality_fingerprint: $("proto-reality-fp").value || "chrome",
+          reality_short_id: $("proto-reality-sid").value.trim(),
+          reality_private_key: $("proto-reality-priv").value.trim(),
+          reality_public_key: $("proto-reality-pub").value.trim(),
+          vless_enabled: $("proto-vless-enabled").checked,
+          vless_path: $("proto-vless-path").value.trim(),
+          vless_local_port: Number($("proto-vless-port").value) || 18201,
+          trojan_enabled: $("proto-trojan-enabled").checked,
+          trojan_path: $("proto-trojan-path").value.trim(),
+          trojan_local_port: Number($("proto-trojan-port").value) || 18202,
+          ipv6_ss_enabled: $("proto-ss-enabled").checked,
+          ipv6_addr: $("proto-ss-ipv6").value.trim(),
+          ss_port: Number($("proto-ss-port").value) || 32888,
+          ss_method: $("proto-ss-method").value,
+          ss_password: $("proto-ss-pass").value.trim(),
+          server_host_override: curProto.server_host_override || ""
+        },
+        overridePatch || {}
+      );
+      await apiFetch("/api/admin/protocols/apply", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      await loadOverview(true);
+      showToast("协议配置已保存，Xray 与订阅已同步更新");
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderRealityScanTable(results) {
+    const tbody = $("reality-scan-tbody");
+    if (!tbody) return;
+    if (!results || !results.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="empty-placeholder">未发现候选域名，请尝试切换扫描模式或输入自定义域名检测</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = results
+      .map((r, idx) => {
+        const catTag = r.category
+          ? ` <span class="badge-tag" style="margin-left:4px;">${escapeHTML(r.category)}</span>`
+          : "";
+        const compatBadge = r.valid
+          ? '<span class="badge-proto ss">TLS1.3 + H2</span>'
+          : '<span class="badge-proto trojan">不兼容</span>';
+        const latText = r.latency_ms > 0 ? `${Number(r.latency_ms)} ms` : "-";
+        const detail = r.valid
+          ? `${escapeHTML(r.ip || "-")}${r.issuer ? " · " + escapeHTML(r.issuer) : ""}`
+          : `<span style="color:var(--text-muted);">${escapeHTML(r.reason || "不支持 TLS 1.3 或 HTTP/2")}</span>`;
+        const actions = r.valid
+          ? `<button type="button" class="btn btn-sm" data-reality-fill="${idx}">填入</button>
+             <button type="button" class="btn btn-primary btn-sm" data-reality-apply="${idx}">设为并保存</button>`
+          : '<span class="mono" style="font-size:12px;color:var(--text-muted);">不可用</span>';
+        return `<tr>
+          <td class="mono">${escapeHTML(r.domain)}${catTag}</td>
+          <td>${compatBadge}</td>
+          <td class="mono">${escapeHTML(latText)}</td>
+          <td style="font-size:12px;">${detail}</td>
+          <td style="text-align:right;white-space:nowrap;">${actions}</td>
+        </tr>`;
+      })
+      .join("");
+
+    tbody.querySelectorAll("[data-reality-fill]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const item = results[Number(btn.getAttribute("data-reality-fill"))];
+        if (!item) return;
+        $("proto-reality-sni").value = item.domain;
+        highlightRealitySNIPill(item.domain);
+        showToast(`已填入 SNI 域名: ${item.domain}（点击底部保存后生效）`);
+      });
+    });
+
+    tbody.querySelectorAll("[data-reality-apply]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const item = results[Number(btn.getAttribute("data-reality-apply"))];
+        if (!item) return;
+        $("proto-reality-sni").value = item.domain;
+        highlightRealitySNIPill(item.domain);
+        await saveProtocolsConfig({ reality_sni: item.domain });
+      });
+    });
+  }
+
+  async function runRealityScan(mode, customText) {
+    if (state.realityScanning) return;
+    if (mode === "custom" && !String(customText || "").trim()) {
+      showToast("请先输入需要检测的域名 (如 www.apple.com)", true);
+      return;
+    }
+    state.realityScanning = true;
+    const scanBtns = ["btn-scan-preset", "btn-scan-neighbor", "btn-scan-custom", "btn-verify-reality-sni"];
+    scanBtns.forEach((id) => {
+      if ($(id)) $(id).disabled = true;
+    });
+
+    const noteEl = $("reality-scan-note");
+    if (noteEl) {
+      noteEl.textContent = "服务器正在并发探测 TCP:443 握手、TLS 1.3、HTTP/2 (h2) 与证书链有效性，请稍候...";
+      noteEl.classList.remove("hidden");
+    }
+    const tbody = $("reality-scan-tbody");
+    if (tbody) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="empty-placeholder">正在从本机服务器扫描检测可用域名...</td></tr>';
+    }
+
+    try {
+      const res = await apiFetch("/api/admin/reality/scan", {
+        method: "POST",
+        body: JSON.stringify({
+          mode: mode || "preset",
+          custom: customText || ""
+        })
+      });
+      const report = res.report || {};
+      state.realityScanRan = true;
+      state.realityScanResults = report.results || [];
+      renderRealityScanTable(state.realityScanResults);
+
+      if (noteEl) {
+        const modeLabel =
+          report.mode === "neighbor"
+            ? "同网段 /24 邻近域名"
+            : report.mode === "custom"
+            ? "指定域名检测"
+            : "内置优选域名池";
+        const baseSummary = `[${modeLabel}] 共检测 ${Number(report.scanned || 0)} 个域名，可用 ${Number(
+          report.valid_count || 0
+        )} 个（已按本机握手延迟升序排列）。`;
+        noteEl.textContent = report.note ? `${baseSummary} ${report.note}` : baseSummary;
+        noteEl.classList.remove("hidden");
+      }
+    } catch (err) {
+      if (noteEl) {
+        noteEl.textContent = "扫描失败: " + err.message;
+        noteEl.classList.remove("hidden");
+      }
+      showToast(err.message, true);
+    } finally {
+      state.realityScanning = false;
+      scanBtns.forEach((id) => {
+        if ($(id)) $(id).disabled = false;
+      });
+    }
   }
 
   // ==================== Logs ====================
@@ -836,40 +1044,64 @@
       }
     });
 
-    $("btn-save-protocols").addEventListener("click", async () => {
-      const btn = $("btn-save-protocols");
-      btn.disabled = true;
+    // Reality SNI Pills, Scanner & Key Rotation
+    $("proto-reality-sni").addEventListener("input", (e) => {
+      highlightRealitySNIPill(e.target.value);
+    });
+
+    document.querySelectorAll("#reality-sni-pills .port-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const sni = pill.getAttribute("data-sni") || "www.apple.com";
+        $("proto-reality-sni").value = sni;
+        highlightRealitySNIPill(sni);
+      });
+    });
+
+    $("btn-regen-reality-keys").addEventListener("click", async () => {
+      if (!window.confirm("确定重新生成 Reality X25519 密钥对与 ShortID 吗？更新后客户端点击“更新订阅”即可同步。")) return;
       try {
-        const curProto = (state.overview && state.overview.config && state.overview.config.protocols) || {};
-        const payload = {
-          node_tag: $("proto-node-tag").value.trim(),
-          uuid: $("proto-uuid").value.trim(),
-          tls_default_port: Number($("proto-tls-port").value) || 443,
-          vless_enabled: $("proto-vless-enabled").checked,
-          vless_path: $("proto-vless-path").value.trim(),
-          vless_local_port: Number($("proto-vless-port").value) || 18201,
-          trojan_enabled: $("proto-trojan-enabled").checked,
-          trojan_path: $("proto-trojan-path").value.trim(),
-          trojan_local_port: Number($("proto-trojan-port").value) || 18202,
-          ipv6_ss_enabled: $("proto-ss-enabled").checked,
-          ipv6_addr: $("proto-ss-ipv6").value.trim(),
-          ss_port: Number($("proto-ss-port").value) || 32888,
-          ss_method: $("proto-ss-method").value,
-          ss_password: $("proto-ss-pass").value.trim(),
-          server_host_override: curProto.server_host_override || ""
-        };
-        await apiFetch("/api/admin/protocols/apply", {
+        const res = await apiFetch("/api/admin/rotate", {
           method: "POST",
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ target: "reality_keys" })
         });
-        await loadOverview(true);
-        showToast("协议配置已保存，Xray 与订阅已同步更新");
+        if (res.private_key) $("proto-reality-priv").value = res.private_key;
+        if (res.public_key) $("proto-reality-pub").value = res.public_key;
+        if (res.short_id) $("proto-reality-sid").value = res.short_id;
+        await loadOverview(false);
+        showToast("Reality 密钥对与 ShortID 已重新生成并同步");
       } catch (err) {
         showToast(err.message, true);
-      } finally {
-        btn.disabled = false;
       }
     });
+
+    $("btn-toggle-reality-scan").addEventListener("click", () => {
+      const box = $("reality-scanner-box");
+      const opening = box.classList.contains("hidden");
+      box.classList.toggle("hidden", !opening);
+      if (opening && !state.realityScanRan && !state.realityScanning) {
+        runRealityScan("preset", "");
+      }
+    });
+
+    $("btn-verify-reality-sni").addEventListener("click", () => {
+      const cur = $("proto-reality-sni").value.trim() || "www.apple.com";
+      $("reality-scanner-box").classList.remove("hidden");
+      runRealityScan("custom", cur);
+    });
+
+    $("btn-scan-preset").addEventListener("click", () => runRealityScan("preset", ""));
+    $("btn-scan-neighbor").addEventListener("click", () => runRealityScan("neighbor", ""));
+    $("btn-scan-custom").addEventListener("click", () =>
+      runRealityScan("custom", $("reality-scan-custom-input").value.trim())
+    );
+    $("reality-scan-custom-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runRealityScan("custom", $("reality-scan-custom-input").value.trim());
+      }
+    });
+
+    $("btn-save-protocols").addEventListener("click", () => saveProtocolsConfig());
 
     // Preferred IPs & suoha-client Actions
     $("client-platform-select").value = state.clientPlatform;

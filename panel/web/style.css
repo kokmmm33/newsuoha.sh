@@ -662,6 +662,14 @@ textarea:focus {
   text-transform: uppercase;
 }
 
+.badge-proto.reality {
+  background: rgba(168, 85, 247, 0.16);
+  color: #c084fc;
+}
+[data-theme="light"] .badge-proto.reality {
+  color: #7e22ce;
+}
+
 .badge-proto.vless {
   background: rgba(14, 165, 233, 0.15);
   color: #38bdf8;

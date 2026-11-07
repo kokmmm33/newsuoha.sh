@@ -1,6 +1,6 @@
 # New-Suoha: Cloudflare Argo + Xray 可视化 Web 管理面板
 
-轻量、极速、零运行时依赖的 Cloudflare Argo 隧道与多协议优选节点 **Web 管理面板**。单静态 Go 二进制内嵌现代响应式前端，支持在主流 Linux VPS（Debian / Ubuntu / CentOS / Fedora / Alpine）上一键部署并常驻运行，可视化管控 **VLESS-WS**、**Trojan-WS** 与 **IPv6 Shadowsocks 直连共存**节点，内置**单端口统一网关**、**永久固定订阅路径**、**二维码扫码导入**及**本地优选 IP 自动测速上传 (`suoha-client`)** 联动。
+轻量、极速、零运行时依赖的 Cloudflare Argo 隧道与多协议优选节点 **Web 管理面板**。单静态 Go 二进制内嵌现代响应式前端，支持在主流 Linux VPS（Debian / Ubuntu / CentOS / Fedora / Alpine）上一键部署并常驻运行，可视化管控 **VLESS + Reality + XTLS-RPRX-Vision 直连节点**、**VLESS-WS**、**Trojan-WS** 与 **IPv6 Shadowsocks 直连共存**节点，内置**服务器可用 Reality SNI 域名扫描检测**、**单端口统一网关**、**永久固定订阅路径**、**二维码扫码导入**及**本地优选 IP 自动测速上传 (`suoha-client`)** 联动。
 
 ---
 
@@ -19,14 +19,17 @@
 * **零依赖单二进制 Web 面板 (`suoha-panel`)**：
   * Go 静态编译并内嵌完整前端静态页面（无需在 VPS 安装 Python / Node.js 环境），原生适配 `amd64`、`arm64`、`armv7`、`386` 四大架构及 Systemd / Alpine OpenRC。
   * 访问根路径 `http://<VPS_IP>:<固定端口>/` 即可打开登录页（内置防爆破频率限制，支持亮/暗双主题与手机端自适应）。
+* **原生支持 VLESS + Reality + XTLS-RPRX-Vision 高速直连**：
+  * **免自有域名与证书**：自动生成符合 RFC 7748 标准的 X25519 密钥对与 ShortID，默认使用 Apple 域名（`www.apple.com`）作为伪装目标 SNI，既可**独立直连运行**（无需启动 Argo），也可与 Argo 隧道节点无缝共存并自动注入 `sub.txt` 与 `clash.yaml`。
+  * **服务器可用 SNI 域名扫描与自定义设置**：支持由 VPS 本机并发探测内置优选大厂域名池（Apple / Microsoft / AWS / Oracle / Fastly 等）、同网段 `/24` 邻近 IP 证书域名发现，以及任意自定义域名检测；严格校验 **TCP:443 连通性 + TLS 1.3 + HTTP/2 (`h2`) ALPN + 有效证书链** 并按握手延迟升序展示，一键切换应用任意 SNI 域名。
 * **单端口合一 + 免开端口 Argo 穿透访问**：
   * **单端口统一网关**：Web 管理面板、订阅服务 (`sub.txt` / `clash.yaml`)、客户端优选上报 API 与本地 WebSocket 分流共用同一个固定端口（自动迁移并兼容旧版 `/etc/suoha_sub_port`）。
   * **免开端口穿透支持**：无公网端口或 NAT 机器可直接通过 Cloudflare Argo 隧道的 `https://` 域名免证书登录 Web 后台与拉取订阅（面板内可随时开关后台穿透权限）。
 * **双模式 Argo 隧道常驻守护与自愈**：
   * **梭哈模式 (Quick Tunnel)**：无需自有域名，一键生成 `*.trycloudflare.com` 临时隧道；支持进程异常退出或服务器重启后**自动重连自愈并实时刷新订阅文件**。
   * **固定隧道模式 (CF Zero Trust Token)**：免除繁琐的网页 OAuth `cert.pem` 授权流程，直接在面板粘贴 Cloudflare Zero Trust Tunnel Token 与域名即可；CF 后台只需配置**唯一一条规则**指向本地统一网关端口即可同时打通双协议、HTTPS 订阅与面板。
-* **聚焦经典三协议并发共存**：
-  * 可视化开关与编辑 **VLESS-WS**、**Trojan-WS** 及 **IPv6 Shadowsocks 直连**节点参数（UUID/密码、WS 路径、节点前缀、TLS 端口），保存后精准热重载 Xray，不中断现有 Argo 隧道。
+* **多协议并发共存与无感热重载**：
+  * 可视化开关与编辑 **VLESS-Reality-Vision 直连**、**VLESS-WS**、**Trojan-WS** 及 **IPv6 Shadowsocks 直连**节点参数（UUID/密码、SNI 域名、X25519 密钥对、WS 路径、节点前缀、TLS 端口），保存后精准热重载 Xray，不中断现有 Argo 隧道。
 * **可视化优选管理 + 本地测速客户端联动**：
   * 面板支持手动增删改、多行批量粘贴优选 IP / 优选域名、编辑保底公共优选域名，以及一键切换 Cloudflare TLS 端口（`443` / `2053` / `2083` / `2087` / `2096` / `8443`）。
   * 跨平台本地助手 **`suoha-client`** 定时直连测速并自动上报最优 IP，服务端实时重生成订阅。
@@ -63,8 +66,12 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/kokmmm33/newsuoha.sh/main
 面板安装后，随时在 SSH 终端输入 `suoha` 即可打开交互式运维菜单，也支持直接执行子命令：
 
 ```bash
-suoha                # 打开终端交互运维菜单
-suoha info           # 查看面板地址、订阅直链与客户端启动命令
+suoha                # 打开终端交互运维菜单（含 Reality 节点管理与域名扫描子菜单）
+suoha info           # 查看面板地址、Reality 状态、订阅直链与客户端启动命令
+suoha reality on     # 一键开启 VLESS+Reality+Vision 直连节点（默认 SNI: www.apple.com）
+suoha reality scan   # 服务器并发扫描检测低延迟可用 SNI 域名（支持 suoha reality scan neighbor）
+suoha reality sni itunes.apple.com  # 自定义修改 Reality 伪装 SNI 域名并热重启生效
+suoha reality port 8443             # 修改 Reality 公网监听端口
 suoha reset-pwd      # 随机重置（或指定）面板管理员密码并重启生效
 suoha port 28080     # 修改面板与订阅共用的固定监听端口
 suoha argo on        # 允许(on) / 禁止(off) 通过 Argo 隧道域名访问管理面板
@@ -78,11 +85,14 @@ suoha uninstall      # 彻底卸载服务并清理全部配置与订阅数据
 ## Web 面板使用指南
 
 1. **登录面板**：浏览器打开终端输出的 `http://<VPS_IP>:<端口>/`，输入管理员账号与初始密码登录（建议首次登录后在【日志与设置】中修改密码）。
-2. **启动隧道（二选一）**：
+2. **开启 VLESS + Reality + XTLS-RPRX-Vision 直连节点（推荐有公网 IP 机器）**：
+   * 进入【协议配置】，勾选 **启用 VLESS + Reality + XTLS-RPRX-Vision 直连节点**（默认伪装域名已设为 `www.apple.com`，请确保 VPS 防火墙放行对应的 Reality TCP 监听端口）。
+   * 点击 **服务器扫描可用域名**，面板将从服务器直接探测内置 Apple/大厂域名池或同网段 `/24` 邻近网站的 TLS 1.3 + HTTP/2 兼容性与握手延迟，可一键点击 **设为并保存**，也可直接在输入框填写任意自定义域名并点击 **检测此域名**。
+3. **启动 Argo 隧道（无公网端口或需 CDN 优选并发时）**：
    * **快速梭哈**：在【隧道管理】选择 **梭哈模式 (Quick Tunnel)**，勾选“启用 Argo 节点隧道常驻运行”，点击 **保存并应用隧道配置**。面板将自动拉取 `xray` 与 `cloudflared` 内核并分配隧道域名。
    * **绑定自有域名**：在 Cloudflare Zero Trust 控制台创建 Tunnel，复制 `eyJ...` 令牌粘贴至面板 **固定隧道 (CF Zero Trust Token)**，并在 CF 后台添加一条 *Public Hostname* 指向面板提示的 `http://127.0.0.1:<面板端口>`。
-3. **开启 IPv6 SS 直连共存（可选）**：进入【协议配置】，勾选“启用 IPv6 Shadowsocks 直连共存部署”，点击“自动检测”填入本机公网 IPv6 后保存，即可热重载注入 SS 节点。
-4. **扫码或复制订阅**：进入【订阅与节点】，可直接使用客户端扫码、一键唤起导入，或复制直连 HTTP / Argo HTTPS 订阅链接。
+4. **开启 IPv6 SS 直连共存（可选）**：进入【协议配置】，勾选“启用 IPv6 Shadowsocks 直连共存部署”，点击“自动检测”填入本机公网 IPv6 后保存，即可热重载注入 SS 节点。
+5. **扫码或复制订阅**：进入【订阅与节点】，可按协议筛选（含 `仅 VLESS-Reality`）并使用客户端扫码、一键唤起导入，或复制直连 HTTP / Argo HTTPS 订阅链接。
 
 ---
 

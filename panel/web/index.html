@@ -59,6 +59,10 @@
             <span class="status-dot"></span>
             <span id="chip-tunnel-text">Argo: 检测中</span>
           </span>
+          <span id="chip-reality" class="status-chip">
+            <span class="status-dot"></span>
+            <span id="chip-reality-text">Reality: 未启用</span>
+          </span>
           <span id="chip-ss" class="status-chip">
             <span class="status-dot"></span>
             <span id="chip-ss-text">IPv6 SS: 未启用</span>
@@ -89,7 +93,7 @@
         <div class="card-header">
           <div>
             <h2 class="card-title">当前生效隧道与网络概览</h2>
-            <p class="card-desc">展示实时连接域名与服务器网络出口，隧道域名变更时订阅文件会自动无感更新。</p>
+            <p class="card-desc">展示实时连接域名、Reality 直连入口与服务器网络出口，配置变更时订阅文件会自动无感更新。</p>
           </div>
           <div class="card-actions">
             <button id="btn-detect-net" type="button" class="btn btn-sm">重新检测本机 IP</button>
@@ -97,6 +101,12 @@
         </div>
 
         <div class="kv-list" id="active-domain-list">
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">VLESS-Reality 直连节点 <span class="badge-tag">XTLS-Vision · 免域名</span></div>
+              <div id="val-reality-status" class="kv-value mono">未启用 (可在【协议配置】一键开启)</div>
+            </div>
+          </div>
           <div class="kv-item">
             <div class="kv-meta">
               <div class="kv-label">VLESS-WS 隧道域名</div>
@@ -290,13 +300,14 @@
         <div class="card-header">
           <div>
             <h2 class="card-title">当前可用节点矩阵 (<span id="node-total-count">0</span>)</h2>
-            <p class="card-desc">包含动态优选 IP 置顶节点、默认隧道节点、公共优选域名保底节点及共存的 IPv6 SS 直连节点。</p>
+            <p class="card-desc">包含 VLESS-Reality-Vision 直连节点、动态优选 IP 置顶节点、默认隧道节点、公共优选域名保底节点及 IPv6 SS 直连节点。</p>
           </div>
           <div class="card-actions">
             <select id="node-proto-filter" style="width:auto;padding:5px 10px;font-size:12.5px;">
               <option value="all">全部协议</option>
-              <option value="vless">仅 VLESS</option>
-              <option value="trojan">仅 Trojan</option>
+              <option value="reality">仅 VLESS-Reality</option>
+              <option value="vless">仅 VLESS-WS</option>
+              <option value="trojan">仅 Trojan-WS</option>
               <option value="ss">仅 IPv6 SS</option>
             </select>
             <button id="btn-copy-all-nodes" type="button" class="btn btn-primary btn-sm">复制全部节点链接</button>
@@ -314,7 +325,7 @@
               </tr>
             </thead>
             <tbody id="nodes-tbody">
-              <tr><td colspan="4" class="empty-placeholder">暂无节点，请先启动隧道或启用 IPv6 SS</td></tr>
+              <tr><td colspan="4" class="empty-placeholder">暂无节点，请先开启 VLESS-Reality 直连、启动 Argo 隧道或启用 IPv6 SS</td></tr>
             </tbody>
           </table>
         </div>
@@ -353,6 +364,120 @@
               <option value="2096">2096</option>
               <option value="8443">8443</option>
             </select>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- VLESS + Reality + XTLS-RPRX-Vision Direct -->
+        <div class="switch-row" style="margin-bottom:12px;">
+          <div class="switch-meta">
+            <span class="switch-title">启用 VLESS + Reality + XTLS-RPRX-Vision 直连节点 <span class="badge-tag">高速抗封锁直连</span></span>
+            <span class="switch-sub">免自有域名与证书，直接通过本机公网 IP 伪装为目标 TLS 1.3 网站（默认 Apple 域名 <code>www.apple.com</code>），可独立运行或与 Argo 隧道共存</span>
+          </div>
+          <label class="toggle">
+            <input id="proto-reality-enabled" type="checkbox" />
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="form-grid" style="margin-bottom:16px;">
+          <div class="field">
+            <label class="field-label" for="proto-reality-port">
+              <span>Reality 公网监听端口 (TCP)</span>
+              <span class="field-hint">请确保防火墙/安全组放行该端口</span>
+            </label>
+            <input id="proto-reality-port" type="number" min="1" max="65535" class="mono" placeholder="24443 或 443" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-reality-fp">客户端 uTLS 指纹 (fp)</label>
+            <select id="proto-reality-fp">
+              <option value="chrome">chrome (默认通用推荐)</option>
+              <option value="safari">safari (Apple 伪装契合)</option>
+              <option value="ios">ios</option>
+              <option value="firefox">firefox</option>
+              <option value="edge">edge</option>
+              <option value="random">random</option>
+            </select>
+          </div>
+
+          <div class="field span-2">
+            <label class="field-label" for="proto-reality-sni">
+              <span>伪装目标 SNI 域名 (默认使用 Apple 域名，支持手动填写任意支持 TLS 1.3 + H2 的域名)</span>
+            </label>
+            <div class="input-row">
+              <input id="proto-reality-sni" type="text" class="mono" placeholder="www.apple.com" />
+              <button id="btn-verify-reality-sni" type="button" class="btn btn-sm">检测此域名</button>
+              <button id="btn-toggle-reality-scan" type="button" class="btn btn-primary btn-sm">服务器扫描可用域名</button>
+            </div>
+            <div class="port-pills" id="reality-sni-pills" style="margin-top:6px;">
+              <button type="button" class="port-pill" data-sni="www.apple.com">www.apple.com (默认)</button>
+              <button type="button" class="port-pill" data-sni="itunes.apple.com">itunes.apple.com</button>
+              <button type="button" class="port-pill" data-sni="updates.cdn-apple.com">updates.cdn-apple.com</button>
+              <button type="button" class="port-pill" data-sni="swdist.apple.com">swdist.apple.com</button>
+              <button type="button" class="port-pill" data-sni="www.microsoft.com">www.microsoft.com</button>
+              <button type="button" class="port-pill" data-sni="aws.amazon.com">aws.amazon.com</button>
+            </div>
+          </div>
+
+          <!-- Interactive Server Reality SNI Scanner Panel -->
+          <div id="reality-scanner-box" class="field span-2 hidden">
+            <div class="panel-card" style="background:var(--bg-elevated);padding:14px 16px;">
+              <div class="card-header" style="margin-bottom:10px;">
+                <div>
+                  <h3 class="card-title" style="font-size:14px;">服务器可用 Reality SNI 域名扫描检测</h3>
+                  <p class="card-desc">由 VPS 直接向目标发起 TCP:443 握手，严格验证 <strong>TLS 1.3 + HTTP/2 (h2) + 有效证书链</strong> 并按最低握手延迟排序。</p>
+                </div>
+                <div class="card-actions">
+                  <button id="btn-scan-preset" type="button" class="btn btn-primary btn-sm">扫描优选域名池 (Apple/大厂)</button>
+                  <button id="btn-scan-neighbor" type="button" class="btn btn-sm">扫描同网段邻近域名 (/24)</button>
+                </div>
+              </div>
+
+              <div class="input-row" style="margin-bottom:10px;">
+                <input id="reality-scan-custom-input" type="text" class="mono" placeholder="输入其他想要检测的域名 (多个域名用逗号或空格分隔，例如: dl.google.com, www.sony.com)" />
+                <button id="btn-scan-custom" type="button" class="btn btn-sm">检测指定域名</button>
+              </div>
+
+              <div id="reality-scan-note" class="helper-banner hidden" style="margin-bottom:10px;padding:8px 12px;font-size:12px;"></div>
+
+              <div class="table-wrap" style="max-height:260px;overflow-y:auto;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>候选 SNI 域名</th>
+                      <th style="width:130px;">协议兼容性</th>
+                      <th style="width:85px;">握手延迟</th>
+                      <th>解析 IP / 证书签发机构</th>
+                      <th style="width:155px;text-align:right;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reality-scan-tbody">
+                    <tr><td colspan="5" class="empty-placeholder">点击上方“扫描优选域名池”或“扫描同网段邻近域名”开始检测本机低延迟可用域名</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="proto-reality-sid">
+              <span>Reality Short ID (8-16 位十六进制)</span>
+            </label>
+            <input id="proto-reality-sid" type="text" class="mono" placeholder="a1b2c3d4" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="proto-reality-pub">
+              <span>Reality 公钥 (Public Key / pbk)</span>
+              <button id="btn-regen-reality-keys" type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11.5px;">重新生成密钥对</button>
+            </label>
+            <input id="proto-reality-pub" type="text" class="mono" readonly title="由私钥自动推导出客户端公钥" />
+          </div>
+          <div class="field span-2">
+            <label class="field-label" for="proto-reality-priv">
+              <span>Reality 私钥 (X25519 Private Key)</span>
+              <span class="field-hint">留空或点击右上角“重新生成密钥对”将自动生成并同步公钥</span>
+            </label>
+            <input id="proto-reality-priv" type="text" class="mono" autocomplete="off" />
           </div>
         </div>
 

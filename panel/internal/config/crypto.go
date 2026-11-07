@@ -1,10 +1,12 @@
 package config
 
 import (
+	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -125,3 +127,61 @@ func RandomPortInRange(min, max int) int {
 	span := uint32(max - min + 1)
 	return min + int(binary.BigEndian.Uint32(b[:])%span)
 }
+
+// GenerateRealityKeyPair generates an Xray Reality compatible X25519 keypair encoded in RawURL Base64 (43 chars).
+func GenerateRealityKeyPair() (privateKey string, publicKey string, err error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", err
+	}
+	// Apply RFC 7748 Curve25519 scalar clamping (matches `xray x25519`)
+	raw[0] &= 248
+	raw[31] &= 127
+	raw[31] |= 64
+
+	priv, err := ecdh.X25519().NewPrivateKey(raw[:])
+	if err != nil {
+		return "", "", err
+	}
+	pub := priv.PublicKey()
+	return base64.RawURLEncoding.EncodeToString(priv.Bytes()),
+		base64.RawURLEncoding.EncodeToString(pub.Bytes()),
+		nil
+}
+
+// DeriveRealityPublicKey decodes an X25519 private key in any standard/URL base64 variant and returns
+// both normalized RawURL Base64 private key and its corresponding RawURL Base64 public key.
+func DeriveRealityPublicKey(privKeyStr string) (normPriv string, pubKey string, err error) {
+	raw, err := decodeBase6432(privKeyStr)
+	if err != nil {
+		return "", "", err
+	}
+	priv, err := ecdh.X25519().NewPrivateKey(raw)
+	if err != nil {
+		return "", "", err
+	}
+	pub := priv.PublicKey()
+	return base64.RawURLEncoding.EncodeToString(priv.Bytes()),
+		base64.RawURLEncoding.EncodeToString(pub.Bytes()),
+		nil
+}
+
+func decodeBase6432(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, errors.New("empty key")
+	}
+	encodings := []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	}
+	for _, enc := range encodings {
+		if b, err := enc.DecodeString(s); err == nil && len(b) == 32 {
+			return b, nil
+		}
+	}
+	return nil, errors.New("invalid 32-byte base64 key")
+}
+
