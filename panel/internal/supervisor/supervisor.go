@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -184,6 +185,9 @@ func (m *Manager) RuntimeState() subgen.RuntimeState {
 func (m *Manager) Shutdown() {
 	m.StopTunnel()
 	m.StopXray()
+	if m.store != nil && m.store.DataDir() != "" {
+		_ = os.Remove(filepath.Join(m.store.DataDir(), "runtime_state.json"))
+	}
 }
 
 // StopXray terminates the supervised Xray process.
@@ -757,7 +761,69 @@ func (m *Manager) superviseTokenTunnel(ctx context.Context, cfBin, edgeVer, toke
 	}
 }
 
+// PersistedRuntimeSnapshot stores live runtime domains from the running suoha-panel daemon
+// so CLI invocations (`suoha info`) can display the active Argo panel & subscription URLs.
+type PersistedRuntimeSnapshot struct {
+	PID           int    `json:"pid"`
+	UpdatedAt     string `json:"updated_at"`
+	TunnelRunning bool   `json:"tunnel_running"`
+	TunnelState   string `json:"tunnel_state"`
+	ArgoVL        string `json:"argo_vl,omitempty"`
+	ArgoTR        string `json:"argo_tr,omitempty"`
+	ArgoPanel     string `json:"argo_panel,omitempty"`
+	ServerIP      string `json:"server_ip,omitempty"`
+}
+
+func (m *Manager) saveRuntimeSnapshot() {
+	if m.store == nil || m.store.DataDir() == "" {
+		return
+	}
+	m.mu.RLock()
+	snap := PersistedRuntimeSnapshot{
+		PID:           os.Getpid(),
+		UpdatedAt:     time.Now().Format("2006-01-02 15:04:05"),
+		TunnelRunning: m.tunRunning,
+		TunnelState:   m.tunState,
+		ArgoVL:        m.argoVL,
+		ArgoTR:        m.argoTR,
+		ArgoPanel:     m.argoPanel,
+		ServerIP:      m.serverIP,
+	}
+	m.mu.RUnlock()
+
+	raw, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return
+	}
+	target := filepath.Join(m.store.DataDir(), "runtime_state.json")
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0600); err == nil {
+		_ = os.Rename(tmp, target)
+	}
+}
+
+// ReadRuntimeSnapshot reads runtime_state.json if written by a currently alive suoha-panel daemon.
+func ReadRuntimeSnapshot(dataDir string) (PersistedRuntimeSnapshot, bool) {
+	if strings.TrimSpace(dataDir) == "" {
+		return PersistedRuntimeSnapshot{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(dataDir, "runtime_state.json"))
+	if err != nil {
+		return PersistedRuntimeSnapshot{}, false
+	}
+	var snap PersistedRuntimeSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil || snap.PID <= 0 {
+		return PersistedRuntimeSnapshot{}, false
+	}
+	// Verify the daemon PID is still alive (signal 0 check)
+	if err := syscall.Kill(snap.PID, 0); err != nil && err != syscall.EPERM {
+		return PersistedRuntimeSnapshot{}, false
+	}
+	return snap, true
+}
+
 func (m *Manager) triggerSync() {
+	m.saveRuntimeSnapshot()
 	if m.onSync != nil {
 		m.onSync()
 	}

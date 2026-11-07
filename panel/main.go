@@ -71,7 +71,7 @@ func printUsage() {
   suoha-panel info [-data-dir /opt/suoha]           查看当前面板地址、订阅链接与客户端命令
   suoha-panel reset-password [-user X] [-password Y] 重置管理员账号与登录密码(不指定密码则随机生成)
   suoha-panel set-port [-data-dir /opt/suoha] <端口> 修改面板与订阅共用固定监听端口(自动放行防火墙)
-  suoha-panel argo-panel <on|off>                   开启或关闭通过 Argo 隧道域名访问管理面板
+  suoha-panel argo-panel <on|off|quick>             开启/关闭 Argo 穿透权限，或 quick 一键启动临时隧道穿透面板
   suoha-panel reality <status|on|off|sni|port|rekey|scan> [参数]
                                                     管理 VLESS+Reality+Vision 直连节点与扫描可用 SNI 域名
   suoha-panel ufw <status|sync|enable|disable|allow|deny|limit|delete|install> [参数]
@@ -324,22 +324,58 @@ func runArgoPanelToggle(args []string) {
 	_ = fs.Parse(args)
 
 	rest := fs.Args()
-	if len(rest) < 1 || (rest[0] != "on" && rest[0] != "off") {
-		log.Fatalf("用法: suoha-panel argo-panel <on|off>")
+	action := ""
+	if len(rest) > 0 {
+		action = strings.ToLower(strings.TrimSpace(rest[0]))
 	}
-	enable := rest[0] == "on"
 	store := openStore(*dataDir, *noLegacy)
-	_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
-		d.AllowArgoPanel = enable
-		return nil
-	})
-	if err != nil {
-		log.Fatalf("[错误] 更新配置失败: %v", err)
-	}
-	if enable {
-		fmt.Println("已开启通过 Argo 隧道域名访问管理面板 (重启面板服务或面板热加载后生效)")
-	} else {
-		fmt.Println("已关闭通过 Argo 隧道域名访问管理面板")
+
+	switch action {
+	case "on", "off":
+		enable := action == "on"
+		cfg, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.AllowArgoPanel = enable
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 更新配置失败: %v", err)
+		}
+		if enable {
+			fmt.Println("已开启通过 Argo 隧道域名访问管理面板。")
+			if !cfg.Tunnel.Enabled && !cfg.Tunnel.PanelQuickTunnel {
+				fmt.Println("提示: 当前尚未启用 Argo 隧道进程，如需立即生成临时穿透地址可执行: suoha argo quick")
+			}
+		} else {
+			fmt.Println("已关闭通过 Argo 隧道域名访问管理面板")
+		}
+
+	case "quick":
+		_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.AllowArgoPanel = true
+			if !d.Tunnel.Enabled {
+				d.Tunnel.PanelQuickTunnel = true
+			} else if d.Tunnel.Mode == "quick" && d.Tunnel.QuickTopology == "dual" {
+				d.Tunnel.PanelQuickTunnel = true
+			}
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 开启 Argo 面板穿透隧道失败: %v", err)
+		}
+		fmt.Println("已开启 Argo 面板穿透并启用临时隧道 (Quick Tunnel)，正在等待服务分配 https:// 穿透域名...")
+
+	case "wait":
+		deadline := time.Now().Add(18 * time.Second)
+		for time.Now().Before(deadline) {
+			if snap, ok := supervisor.ReadRuntimeSnapshot(store.DataDir()); ok && strings.TrimSpace(snap.ArgoPanel) != "" {
+				break
+			}
+			time.Sleep(600 * time.Millisecond)
+		}
+		printPanelSummary(store, store.InitialGeneratedPassword())
+
+	default:
+		log.Fatalf("用法: suoha-panel argo-panel <on|off|quick>")
 	}
 }
 
@@ -730,9 +766,14 @@ func printRealitySummary(store *config.Store) {
 
 func printPanelSummary(store *config.Store, plainPwd string) {
 	cfg := store.GetConfig()
-	netInfo := supervisor.DetectNetwork()
+	snap, snapAlive := supervisor.ReadRuntimeSnapshot(store.DataDir())
+
 	host := strings.TrimSpace(cfg.Protocols.ServerHostOverride)
+	if host == "" && snapAlive && strings.TrimSpace(snap.ServerIP) != "" {
+		host = strings.TrimSpace(snap.ServerIP)
+	}
 	if host == "" {
+		netInfo := supervisor.DetectNetwork()
 		host = netInfo.ServerIP
 	}
 	if host == "" {
@@ -740,9 +781,30 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 	}
 	baseURL := fmt.Sprintf("http://%s:%d", subgen.FormatHostForURL(host), cfg.ListenPort)
 
-	argoHint := "已允许 (启动单隧道梭哈或固定隧道后可通过 HTTPS 隧道域名免端口访问)"
-	if !cfg.AllowArgoPanel {
-		argoHint = "已关闭 (仅开放直连 IP:Port 访问后台)"
+	argoDomain := ""
+	if snapAlive && strings.TrimSpace(snap.ArgoPanel) != "" {
+		argoDomain = strings.TrimSpace(snap.ArgoPanel)
+	} else if cfg.Tunnel.Enabled && cfg.Tunnel.Mode == "token" && strings.TrimSpace(cfg.Tunnel.CustomDomain) != "" {
+		argoDomain = strings.TrimSpace(cfg.Tunnel.CustomDomain)
+	}
+
+	argoLabel := "Argo 面板穿透  "
+	argoValue := ""
+	switch {
+	case argoDomain != "" && cfg.AllowArgoPanel:
+		argoLabel = "Argo 面板地址  "
+		argoValue = fmt.Sprintf("https://%s/  (免端口 HTTPS 穿透访问)", argoDomain)
+	case argoDomain != "" && !cfg.AllowArgoPanel:
+		argoValue = fmt.Sprintf("已关闭后台穿透 (隧道域名 https://%s 仅开放订阅)", argoDomain)
+	case !cfg.AllowArgoPanel:
+		argoValue = "已关闭 (仅开放直连 IP:Port 访问后台)"
+	case cfg.Tunnel.Enabled && cfg.Tunnel.Mode == "quick" && cfg.Tunnel.QuickTopology == "dual" && !cfg.Tunnel.PanelQuickTunnel:
+		argoValue = "双隧道模式未勾选独立面板隧道 (可执行 suoha argo quick 一键开启面板穿透)"
+	case snapAlive && snap.TunnelState == "starting":
+		argoLabel = "Argo 面板地址  "
+		argoValue = "正在向 Cloudflare 申请临时隧道域名，请稍候数秒再执行 suoha info 查看..."
+	default:
+		argoValue = "尚未启动 Argo 隧道 (可在面板【隧道管理】开启，或执行 suoha argo quick 一键分配 https:// 地址)"
 	}
 
 	realityHint := fmt.Sprintf("未启用 (默认 Apple SNI: %s，可在面板开启或执行 suoha reality on)", cfg.Protocols.RealitySNI)
@@ -750,23 +812,32 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 		realityHint = fmt.Sprintf("已启用 (端口 :%d | SNI: %s | XTLS-RPRX-Vision)", cfg.Protocols.RealityPort, cfg.Protocols.RealitySNI)
 	}
 
+	clientServerURL := baseURL
+	if argoDomain != "" {
+		clientServerURL = "https://" + argoDomain
+	}
+
 	fmt.Println("==========================================================")
 	fmt.Println("             New-Suoha Web 管理面板信息                   ")
 	fmt.Println("==========================================================")
-	fmt.Printf("面板访问地址   : %s/\n", baseURL)
+	fmt.Printf("面板直连地址   : %s/\n", baseURL)
+	fmt.Printf("%s: %s\n", argoLabel, argoValue)
 	fmt.Printf("管理员用户名   : %s\n", cfg.AdminUser)
 	if plainPwd != "" {
 		fmt.Printf("初始登录密码   : %s  (请妥善保存并登录后按需修改)\n", plainPwd)
 	} else {
 		fmt.Printf("管理员登录密码 : (已加密保存，遗忘可执行 suoha 重置密码)\n")
 	}
-	fmt.Printf("Argo 面板穿透  : %s\n", argoHint)
 	fmt.Printf("Reality 直连   : %s\n", realityHint)
 	fmt.Println("----------------------------------------------------------")
 	fmt.Printf("通用订阅直链   : %s/%s/sub.txt\n", baseURL, cfg.SubUUID)
 	fmt.Printf("Clash 配置直链 : %s/%s/clash.yaml\n", baseURL, cfg.SubUUID)
+	if argoDomain != "" {
+		fmt.Printf("Argo 通用订阅  : https://%s/%s/sub.txt\n", argoDomain, cfg.SubUUID)
+		fmt.Printf("Argo Clash配置 : https://%s/%s/clash.yaml\n", argoDomain, cfg.SubUUID)
+	}
 	fmt.Printf("客户端 Token   : %s\n", cfg.ClientToken)
-	fmt.Printf("一键优选测速   : sh -c \"$(curl -fsSL '%s/api/client.sh?token=%s&once=1')\"\n", baseURL, cfg.ClientToken)
+	fmt.Printf("一键优选测速   : sh -c \"$(curl -fsSL '%s/api/client.sh?token=%s&once=1')\"\n", clientServerURL, cfg.ClientToken)
 	fmt.Println("==========================================================")
 }
 

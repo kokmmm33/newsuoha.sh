@@ -80,7 +80,7 @@ suoha ufw enable     # 防失联安全启用 UFW（自动预放行 SSH + 面板 
 suoha ufw allow 443/tcp             # 手动在 UFW 放行指定端口或端口段
 suoha reset-pwd      # 随机重置（或指定）面板管理员密码并重启生效
 suoha port 28080     # 修改面板与订阅共用的固定监听端口（自动同步系统防火墙）
-suoha argo on        # 允许(on) / 禁止(off) 通过 Argo 隧道域名访问管理面板
+suoha argo quick     # 一键启动 Argo 临时穿透隧道并在终端输出 https:// 面板地址（支持 quick/on/off）
 suoha restart        # 重启面板及托管的隧道服务
 suoha update         # 在线更新面板二进制内核（完整保留现有配置）
 suoha uninstall      # 彻底卸载服务并清理全部配置与订阅数据

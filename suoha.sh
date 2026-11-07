@@ -556,11 +556,35 @@ interactive_menu() {
                 fi
                 ;;
             4)
-                read -r -p "是否允许通过 Argo 隧道域名访问管理面板？(输入 on 开启 / off 关闭): " argo_opt
-                if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$argo_opt"; then
-                    service_restart
-                    ok "Argo 面板穿透策略已生效。"
-                fi
+                echo "----------------------------------------------------------"
+                echo " 1. 一键开启 Argo 临时隧道穿透面板 (自动分配 https://*.trycloudflare.com 地址)"
+                echo " 2. 允许通过已有 Argo 隧道访问管理面板 (on)"
+                echo " 3. 禁止通过 Argo 隧道访问管理面板，仅保留订阅 (off)"
+                echo "----------------------------------------------------------"
+                read -r -p "请选择 [1-3, 默认 1]: " argo_choice
+                case "${argo_choice:-1}" in
+                    1|quick)
+                        if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" quick; then
+                            service_restart
+                            "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
+                        fi
+                        ;;
+                    2|on)
+                        if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" on; then
+                            service_restart
+                            ok "Argo 面板穿透权限已开启。"
+                        fi
+                        ;;
+                    3|off)
+                        if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" off; then
+                            service_restart
+                            ok "已关闭通过 Argo 隧道访问面板后台。"
+                        fi
+                        ;;
+                    *)
+                        warn "无效选项"
+                        ;;
+                esac
                 ;;
             5)
                 reality_submenu
@@ -622,8 +646,12 @@ main() {
         argo)
             require_root
             shift
-            "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$@"
+            local a_act="${1:-quick}"
+            "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$a_act"
             service_restart
+            if [ "$a_act" = "quick" ]; then
+                "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
+            fi
             ;;
         reality)
             require_root
@@ -670,7 +698,7 @@ main() {
             fi
             ;;
         *)
-            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <on|off>|reality <status|on|off|sni|port|rekey|scan>|ufw <status|sync|enable|disable|allow|deny|delete|install>|start|stop|restart|update|uninstall]"
+            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <quick|on|off>|reality <status|on|off|sni|port|rekey|scan>|ufw <status|sync|enable|disable|allow|deny|delete|install>|start|stop|restart|update|uninstall]"
             exit 1
             ;;
     esac
