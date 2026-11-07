@@ -798,16 +798,29 @@
   // ==================== VPS Firewall (UFW) ====================
   function renderFirewallState(fw) {
     if (!fw) return;
+    state.firewall = fw;
+
     const installBtn = $("btn-fw-install");
     const enableBtn = $("btn-fw-enable");
     const disableBtn = $("btn-fw-disable");
     const syncBtn = $("btn-fw-sync");
     const banner = $("fw-backend-banner");
+    const blockedBanner = $("fw-blocked-banner");
 
     if (installBtn) installBtn.classList.toggle("hidden", !!fw.ufw_installed);
     if (enableBtn) enableBtn.disabled = !fw.ufw_installed || !!fw.ufw_active;
     if (disableBtn) disableBtn.disabled = !fw.ufw_installed || !fw.ufw_active;
     if (syncBtn) syncBtn.disabled = !fw.is_root;
+
+    const unallowed = fw.unallowed_services || [];
+    if (blockedBanner) {
+      if (unallowed.length > 0) {
+        blockedBanner.textContent = `⚠️ 检测到本机运行中的外部服务尚未在 UFW 中放行（当前正被防火墙拦截，可能导致 HTTP 522 连接超时）：${unallowed.join("、")}。请点击右上角「一键放行面板与系统服务」或在下方检测表点击「立即放行」恢复访问！`;
+        blockedBanner.classList.remove("hidden");
+      } else {
+        blockedBanner.classList.add("hidden");
+      }
+    }
 
     const bannerNotes = [];
     if (!fw.is_root) {
@@ -836,9 +849,12 @@
         const defOut = fw.default_outgoing || "allow";
         stEl.textContent = `运行中 (Active)  |  默认入站: ${defIn}  ·  默认出站: ${defOut}`;
       } else {
-        stEl.textContent = "未启用 (Inactive)  |  点击右上角「安全启用 UFW」将自动放行保护端口后开启防护";
+        stEl.textContent = "未启用 (Inactive)  |  点击右上角「安全启用 UFW」将自动放行本机 SSH、面板及全部运行中的外部服务端口后开启防护";
       }
     }
+
+    const detected = fw.detected_ports || [];
+    const extServices = detected.filter((d) => !d.managed_role);
 
     const protEl = $("val-fw-protected");
     if (protEl) {
@@ -852,7 +868,110 @@
       if (fw.ss_enabled) {
         parts.push(`IPv6 SS: ${fw.ss_port}/tcp+udp (已联动放行)`);
       }
+      if (extServices.length > 0) {
+        const extLabels = extServices.map((d) => {
+          const pDisp = d.proto === "any" ? "tcp+udp" : d.proto;
+          return d.process ? `${d.port}/${pDisp} (${d.process})` : `${d.port}/${pDisp}`;
+        });
+        parts.push(`其他运行服务: ${extLabels.join(", ")}`);
+      }
       protEl.textContent = parts.join("  |  ");
+    }
+
+    // Render Detected System Listening Ports Table
+    const detCountEl = $("fw-detected-count");
+    if (detCountEl) detCountEl.textContent = String(detected.length);
+    const detTbody = $("fw-detected-tbody");
+    if (detTbody) {
+      if (!detected.length) {
+        detTbody.innerHTML =
+          '<tr><td colspan="5" class="empty-placeholder">暂未检测到非回环 (0.0.0.0 / ::) 外部监听端口</td></tr>';
+      } else {
+        detTbody.innerHTML = detected
+          .map((d) => {
+            const protoLabel = d.proto === "any" ? "tcp+udp" : d.proto;
+            const roleBadge = d.managed_role
+              ? ` <span class="badge-proto vless" style="margin-left:4px;">${escapeHTML(d.managed_role)}</span>`
+              : ' <span class="badge-tag" style="margin-left:4px;">系统服务</span>';
+
+            const procTitle = d.process
+              ? `<span class="mono" style="font-weight:600;">${escapeHTML(d.process)}</span>${d.pid ? ` <span style="font-size:11.5px;color:var(--text-muted);">(PID ${d.pid})</span>` : ""}`
+              : '<span style="color:var(--text-muted);">内核/其他进程</span>';
+            const hintSub = d.service_hint
+              ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${escapeHTML(d.service_hint)}</div>`
+              : "";
+
+            const addrs = (d.listen_addrs || []).join(", ") || "*";
+
+            let statusBadge = "";
+            if (!fw.ufw_installed) {
+              statusBadge = '<span class="badge-proto muted">UFW 未安装</span>';
+            } else if (d.ufw_status === "allowed") {
+              statusBadge = '<span class="badge-proto ss">已放行 (ALLOW)</span>';
+            } else if (d.ufw_status === "restricted") {
+              statusBadge = '<span class="badge-proto vless">按来源IP放行</span>';
+            } else if (d.ufw_status === "denied") {
+              statusBadge = '<span class="badge-proto danger">已显式拦截 (DENY)</span>';
+            } else if (d.blocked_by_ufw) {
+              statusBadge = '<span class="badge-proto danger">未放行 · 拦截中!</span>';
+            } else {
+              statusBadge = '<span class="badge-proto trojan">未建规则 (待放行)</span>';
+            }
+
+            let opHtml = '<span style="font-size:12px;color:var(--text-muted);">-</span>';
+            if (fw.ufw_installed && fw.is_root && d.ufw_status === "unconfigured") {
+              opHtml = `<button type="button" class="btn btn-primary btn-sm" data-fw-allow-port="${d.port}" data-fw-allow-proto="${escapeHTML(d.proto)}" data-fw-allow-proc="${escapeHTML(d.process || "")}" data-fw-allow-role="${escapeHTML(d.managed_role || "")}">立即放行</button>`;
+            } else if (d.ufw_status === "allowed") {
+              opHtml = '<span style="font-size:12px;color:var(--status-ok);">正常通行</span>';
+            } else if (d.ufw_status === "restricted") {
+              opHtml = '<span style="font-size:12px;color:var(--text-secondary);">保留白名单</span>';
+            } else if (d.ufw_status === "denied") {
+              opHtml = '<span style="font-size:12px;color:var(--text-muted);">保留手动拦截</span>';
+            }
+
+            return `<tr>
+              <td class="mono"><strong>${d.port}</strong>/${escapeHTML(protoLabel)}${roleBadge}</td>
+              <td>${procTitle}${hintSub}</td>
+              <td class="mono" style="font-size:12px;">${escapeHTML(addrs)}</td>
+              <td>${statusBadge}</td>
+              <td style="text-align:right;">${opHtml}</td>
+            </tr>`;
+          })
+          .join("");
+
+        detTbody.querySelectorAll("[data-fw-allow-port]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const port = btn.getAttribute("data-fw-allow-port");
+            const proto = btn.getAttribute("data-fw-allow-proto") || "any";
+            const proc = btn.getAttribute("data-fw-allow-proc") || "";
+            const mRole = btn.getAttribute("data-fw-allow-role") || "";
+            let comment = proc ? `Sys-${proc}` : `Sys-Port-${port}`;
+            if (mRole === "SSH") comment = "SSH";
+            else if (mRole === "面板端口") comment = "Suoha-Panel";
+            else if (mRole === "Reality") comment = "Suoha-Reality";
+            else if (mRole === "IPv6-SS") comment = "Suoha-IPv6-SS";
+
+            btn.disabled = true;
+            try {
+              const res = await apiFetch("/api/admin/firewall/rule/add", {
+                method: "POST",
+                body: JSON.stringify({
+                  action: "allow",
+                  port: String(port),
+                  proto,
+                  from: "",
+                  comment
+                })
+              });
+              renderFirewallState(res.firewall);
+              showToast(`已放行端口 ${port}/${proto === "any" ? "tcp+udp" : proto}`);
+            } catch (err) {
+              showToast(err.message, true);
+              btn.disabled = false;
+            }
+          });
+        });
+      }
     }
 
     const rules = fw.rules || [];
@@ -867,7 +986,7 @@
     }
     if (!rules.length) {
       tbody.innerHTML =
-        '<tr><td colspan="6" class="empty-placeholder">当前暂无 UFW 规则，可点击「一键放行本面板端口」或在上方添加端口规则</td></tr>';
+        '<tr><td colspan="6" class="empty-placeholder">当前暂无 UFW 规则，可点击「一键放行面板与系统服务」或在上方添加端口规则</td></tr>';
       return;
     }
 
@@ -906,7 +1025,7 @@
         let force = false;
         if (isProt) {
           const ok = window.confirm(
-            `⚠️ 高危警告：规则 [${ruleIdx}] (${toPort}) 是当前正在使用的【${role}】保护规则！\n若无其他放行规则，删除后可能导致 SSH 或面板立即无法连接。\n确定要强制删除吗？`
+            `⚠️ 高危警告：规则 [${ruleIdx}] (${toPort}) 是当前正在使用的【${role}】保护规则！\n若无其他放行规则，删除后可能导致 SSH/面板失联或该运行服务外部访问中断（如 HTTP 522）。\n确定要强制删除吗？`
           );
           if (!ok) return;
           force = true;
@@ -1445,16 +1564,26 @@
     );
 
     $("btn-fw-sync").addEventListener("click", () =>
-      execFirewallAction("sync", "", "已同步放行 SSH、面板及启用中的节点端口")
+      execFirewallAction("sync", "", "已同步放行 SSH、Suoha 面板/节点及系统中运行的其他服务端口")
     );
 
-    $("btn-fw-enable").addEventListener("click", () =>
+    $("btn-fw-enable").addEventListener("click", () => {
+      const fw = state.firewall || {};
+      const extList = (fw.detected_ports || [])
+        .filter((d) => !d.managed_role && d.ufw_status === "unconfigured")
+        .map((d) => {
+          const pDisp = d.proto === "any" ? "tcp+udp" : d.proto;
+          return d.process ? `${d.port}/${pDisp} (${d.process})` : `${d.port}/${pDisp}`;
+        });
+      const extHint = extList.length
+        ? `\n• 检测到的系统运行服务: ${extList.join(", ")}`
+        : "\n• 已扫描系统运行服务（保留所有外部监听端口正常通行）";
       execFirewallAction(
         "enable",
-        "启用 UFW 前，面板将自动放行本机 SSH 端口、面板监听端口及已启用的 Reality / SS 端口以防失联。\n确定启用 UFW 防火墙吗？",
-        "UFW 防火墙已安全启用"
-      )
-    );
+        `启用 UFW 前，面板将自动预放行以下端口，确保不影响 SSH、面板及任何现有服务访问：\n• 本机 SSH 端口、面板端口及已启用的 Reality / SS 端口${extHint}\n\n确定安全启用 UFW 防火墙吗？`,
+        "UFW 防火墙已安全启用（已自动放行全部运行中的服务端口）"
+      );
+    });
 
     $("btn-fw-disable").addEventListener("click", () =>
       execFirewallAction("disable", "确定要停用 UFW 系统防火墙吗？（已有规则将保留）", "UFW 防火墙已停用")

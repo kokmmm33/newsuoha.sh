@@ -927,7 +927,7 @@ func (h *Handler) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
 	case "sync":
 		synced = firewall.SyncPanelPorts(r.Context(), cfg, true)
 		if len(synced) > 0 {
-			h.mgr.Logs().Add("panel", "已一键同步放行面板及节点端口: "+strings.Join(synced, ", "))
+			h.mgr.Logs().Add("panel", "已一键同步放行面板及系统运行服务端口: "+strings.Join(synced, ", "))
 		}
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "不支持的防火墙操作: " + req.Action})

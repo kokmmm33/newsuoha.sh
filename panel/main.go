@@ -699,6 +699,46 @@ func printFirewallSummary(ctx context.Context, cfg config.PanelConfig) {
 	if st.OtherBackend != "" {
 		fmt.Printf("底层防火墙提示 : %s\n", st.OtherBackend)
 	}
+	if len(st.UnallowedServices) > 0 {
+		fmt.Printf("[!] 拦截告警   : 检测到运行中的外部服务尚未放行 (%s)，可执行 `suoha ufw sync` 一键放行！\n",
+			strings.Join(st.UnallowedServices, ", "))
+	}
+
+	if len(st.DetectedPorts) > 0 {
+		fmt.Println("--------------------------------------------------------------------------")
+		fmt.Printf("%-16s %-22s %-18s %s\n", "监听端口/协议", "占用进程/PID", "UFW状态", "服务识别")
+		fmt.Println("--------------------------------------------------------------------------")
+		for _, dp := range st.DetectedPorts {
+			pProto := dp.Proto
+			if pProto == "any" {
+				pProto = "tcp+udp"
+			}
+			portCol := fmt.Sprintf("%d/%s", dp.Port, pProto)
+			procCol := dp.Process
+			if procCol == "" {
+				procCol = "-"
+			} else if dp.PID > 0 {
+				procCol = fmt.Sprintf("%s(%d)", dp.Process, dp.PID)
+			}
+			ufwCol := dp.UFWStatus
+			switch {
+			case !st.UFWInstalled:
+				ufwCol = "UFW未安装"
+			case dp.UFWStatus == "allowed":
+				ufwCol = "已放行(ALLOW)"
+			case dp.UFWStatus == "restricted":
+				ufwCol = "按来源IP放行"
+			case dp.UFWStatus == "denied":
+				ufwCol = "已拦截(DENY)"
+			case dp.BlockedByUFW:
+				ufwCol = "未放行[拦截中!]"
+			default:
+				ufwCol = "未建规则"
+			}
+			fmt.Printf("%-16s %-22s %-18s %s\n", portCol, procCol, ufwCol, dp.ServiceHint)
+		}
+	}
+
 	if len(st.Rules) > 0 {
 		fmt.Println("--------------------------------------------------------------------------")
 		fmt.Printf("%-6s %-22s %-12s %-18s %s\n", "编号", "目标端口/协议", "动作", "来源地址", "角色/备注")
@@ -723,7 +763,7 @@ func printFirewallSummary(ctx context.Context, cfg config.PanelConfig) {
 		}
 	} else if st.UFWInstalled && st.IsRoot {
 		fmt.Println("--------------------------------------------------------------------------")
-		fmt.Println("暂无已配置的 UFW 端口规则（可执行 `suoha ufw sync` 一键同步放行节点端口）")
+		fmt.Println("暂无已配置的 UFW 端口规则（可执行 `suoha ufw sync` 一键同步放行面板与系统服务端口）")
 	}
 	fmt.Println("==========================================================================")
 }

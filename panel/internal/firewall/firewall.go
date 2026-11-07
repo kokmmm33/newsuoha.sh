@@ -41,21 +41,23 @@ type RuleSpec struct {
 	Comment string `json:"comment"` // optional label
 }
 
-// Status summarizes the current VPS internal firewall (UFW + other active backends).
+// Status summarizes the current VPS internal firewall (UFW + other active backends) and active listening services.
 type Status struct {
-	IsRoot           bool       `json:"is_root"`
-	UFWInstalled     bool       `json:"ufw_installed"`
-	UFWActive        bool       `json:"ufw_active"`
-	DefaultIncoming  string     `json:"default_incoming,omitempty"`
-	DefaultOutgoing  string     `json:"default_outgoing,omitempty"`
-	DetectedSSHPorts []int      `json:"detected_ssh_ports"`
-	PanelPort        int        `json:"panel_port"`
-	RealityEnabled   bool       `json:"reality_enabled"`
-	RealityPort      int        `json:"reality_port"`
-	SSEnabled        bool       `json:"ss_enabled"`
-	SSPort           int        `json:"ss_port"`
-	OtherBackend     string     `json:"other_backend,omitempty"`
-	Rules            []RuleItem `json:"rules"`
+	IsRoot            bool           `json:"is_root"`
+	UFWInstalled      bool           `json:"ufw_installed"`
+	UFWActive         bool           `json:"ufw_active"`
+	DefaultIncoming   string         `json:"default_incoming,omitempty"`
+	DefaultOutgoing   string         `json:"default_outgoing,omitempty"`
+	DetectedSSHPorts  []int          `json:"detected_ssh_ports"`
+	PanelPort         int            `json:"panel_port"`
+	RealityEnabled    bool           `json:"reality_enabled"`
+	RealityPort       int            `json:"reality_port"`
+	SSEnabled         bool           `json:"ss_enabled"`
+	SSPort            int            `json:"ss_port"`
+	OtherBackend      string         `json:"other_backend,omitempty"`
+	Rules             []RuleItem     `json:"rules"`
+	DetectedPorts     []DetectedPort `json:"detected_ports"`
+	UnallowedServices []string       `json:"unallowed_services,omitempty"`
 }
 
 var (
@@ -400,31 +402,62 @@ func decodeHexOrPlain(s string) (string, error) {
 	return s, nil
 }
 
-func annotateProtectedRules(rules []RuleItem, sshPorts []int, cfg config.PanelConfig) []RuleItem {
+func annotateProtectedRules(rules []RuleItem, sshPorts []int, cfg config.PanelConfig, detectedSets ...[]DetectedPort) []RuleItem {
 	sshMap := make(map[int]bool, len(sshPorts))
 	for _, p := range sshPorts {
 		sshMap[p] = true
 	}
+	var thirdParty []DetectedPort
+	if len(detectedSets) > 0 {
+		for _, dp := range detectedSets[0] {
+			if dp.ManagedRole == "" {
+				thirdParty = append(thirdParty, dp)
+			}
+		}
+	}
+
 	for i := range rules {
 		port := extractLeadingPort(rules[i].To)
 		if port <= 0 {
 			if strings.EqualFold(rules[i].To, "OpenSSH") || strings.EqualFold(rules[i].To, "ssh") || rules[i].To == "22/tcp" {
 				rules[i].Protected = true
 				rules[i].Role = "SSH"
+				continue
 			}
-			continue
+		} else {
+			switch {
+			case sshMap[port]:
+				rules[i].Protected = true
+				rules[i].Role = "SSH"
+				continue
+			case port == cfg.ListenPort:
+				rules[i].Protected = true
+				rules[i].Role = "面板端口"
+				continue
+			case cfg.Protocols.RealityEnabled && port == cfg.Protocols.RealityPort:
+				rules[i].Role = "Reality"
+				continue
+			case cfg.Protocols.IPv6SSEnabled && port == cfg.Protocols.SSPort:
+				rules[i].Role = "IPv6-SS"
+				continue
+			}
 		}
-		switch {
-		case sshMap[port]:
-			rules[i].Protected = true
-			rules[i].Role = "SSH"
-		case port == cfg.ListenPort:
-			rules[i].Protected = true
-			rules[i].Role = "面板端口"
-		case cfg.Protocols.RealityEnabled && port == cfg.Protocols.RealityPort:
-			rules[i].Role = "Reality"
-		case cfg.Protocols.IPv6SSEnabled && port == cfg.Protocols.SSPort:
-			rules[i].Role = "IPv6-SS"
+
+		// Protect ALLOW/LIMIT rules belonging to active external system services (e.g. Caddy, Nginx, Docker)
+		actUpper := strings.ToUpper(strings.TrimSpace(rules[i].Action))
+		if strings.HasPrefix(actUpper, "ALLOW") || strings.HasPrefix(actUpper, "LIMIT") {
+			for _, dp := range thirdParty {
+				covTCP, covUDP := ruleCoversPort(rules[i].To, dp.Port)
+				if covTCP || covUDP {
+					rules[i].Protected = true
+					if dp.Process != "" {
+						rules[i].Role = "服务: " + dp.Process
+					} else {
+						rules[i].Role = "系统监听服务"
+					}
+					break
+				}
+			}
 		}
 	}
 	return rules
@@ -463,7 +496,18 @@ func detectOtherFirewallBackend(ctx context.Context, ufwActive bool) string {
 	return ""
 }
 
-// GetStatus queries current UFW installation, state, default policies, and rule table.
+func formatDetectedPortBadge(dp DetectedPort) string {
+	protoDisp := dp.Proto
+	if protoDisp == "any" {
+		protoDisp = "tcp+udp"
+	}
+	if dp.Process != "" {
+		return fmt.Sprintf("%d/%s (%s)", dp.Port, protoDisp, dp.Process)
+	}
+	return fmt.Sprintf("%d/%s", dp.Port, protoDisp)
+}
+
+// GetStatus queries current UFW installation, state, default policies, rule table, and active system listening services.
 func GetStatus(ctx context.Context, cfg config.PanelConfig) Status {
 	sshPorts := DetectSSHPorts()
 	st := Status{
@@ -475,6 +519,7 @@ func GetStatus(ctx context.Context, cfg config.PanelConfig) Status {
 		SSEnabled:        cfg.Protocols.IPv6SSEnabled,
 		SSPort:           cfg.Protocols.SSPort,
 		Rules:            []RuleItem{},
+		DetectedPorts:    []DetectedPort{},
 	}
 
 	ufwBin := findSysBin("ufw")
@@ -482,6 +527,7 @@ func GetStatus(ctx context.Context, cfg config.PanelConfig) Status {
 
 	if !st.UFWInstalled || !st.IsRoot {
 		st.OtherBackend = detectOtherFirewallBackend(ctx, false)
+		st.DetectedPorts = DetectListeningPorts(ctx, cfg, sshPorts, nil, false, "")
 		return st
 	}
 
@@ -498,7 +544,15 @@ func GetStatus(ctx context.Context, cfg config.PanelConfig) Status {
 	if !active && len(rules) == 0 {
 		rules = parseInactiveUFWUserRules()
 	}
-	st.Rules = annotateProtectedRules(rules, sshPorts, cfg)
+
+	detected := DetectListeningPorts(ctx, cfg, sshPorts, rules, active, defIn)
+	st.DetectedPorts = detected
+	for _, dp := range detected {
+		if dp.BlockedByUFW && dp.UFWStatus == "unconfigured" {
+			st.UnallowedServices = append(st.UnallowedServices, formatDetectedPortBadge(dp))
+		}
+	}
+	st.Rules = annotateProtectedRules(rules, sshPorts, cfg, detected)
 	return st
 }
 
@@ -577,7 +631,7 @@ func AddRule(ctx context.Context, rawSpec RuleSpec) error {
 	return nil
 }
 
-// DeleteRule deletes a UFW rule by its 1-based numbered index, guarding SSH & Panel ports unless force=true.
+// DeleteRule deletes a UFW rule by its 1-based numbered index, guarding SSH, Panel, and active system service ports unless force=true.
 func DeleteRule(ctx context.Context, ruleNum int, cfg config.PanelConfig, force bool) error {
 	if ruleNum < 1 {
 		return errors.New("无效的规则编号（仅启用状态下的编号规则支持按序号删除）")
@@ -599,7 +653,9 @@ func DeleteRule(ctx context.Context, ruleNum int, cfg config.PanelConfig, force 
 	if !active {
 		return errors.New("UFW 当前处于未启用状态，请启用后再按编号删除规则")
 	}
-	rules = annotateProtectedRules(rules, DetectSSHPorts(), cfg)
+	sshPorts := DetectSSHPorts()
+	detected := DetectListeningPorts(ctx, cfg, sshPorts, rules, active, "deny")
+	rules = annotateProtectedRules(rules, sshPorts, cfg, detected)
 	var target *RuleItem
 	for i := range rules {
 		if rules[i].Index == ruleNum {
@@ -611,7 +667,7 @@ func DeleteRule(ctx context.Context, ruleNum int, cfg config.PanelConfig, force 
 		return fmt.Errorf("未找到编号为 [%d] 的防火墙规则，请刷新列表后重试", ruleNum)
 	}
 	if target.Protected && !force {
-		return fmt.Errorf("规则 [%d] (%s) 属于受保护的 %s 端口，直接删除可能导致服务器失联！如确认已有其他规则放行，请确认强制删除", ruleNum, target.To, target.Role)
+		return fmt.Errorf("规则 [%d] (%s) 属于受保护的 %s 端口，直接删除可能导致服务器失联或运行中的服务外部访问中断！如确认已有其他规则放行，请确认强制删除", ruleNum, target.To, target.Role)
 	}
 
 	out, err := runCmd(ctx, ufwBin, "--force", "delete", strconv.Itoa(ruleNum))
@@ -621,7 +677,7 @@ func DeleteRule(ctx context.Context, ruleNum int, cfg config.PanelConfig, force 
 	return nil
 }
 
-// EnableUFW safely pre-allows SSH, Panel port, and active proxy ports before enabling UFW.
+// EnableUFW safely pre-allows SSH, Panel port, active proxy ports, and all unconfigured external listening services before enabling UFW.
 func EnableUFW(ctx context.Context, cfg config.PanelConfig) ([]string, error) {
 	if os.Geteuid() != 0 {
 		return nil, errors.New("需要 root 权限才能启用 UFW 防火墙")
@@ -631,7 +687,7 @@ func EnableUFW(ctx context.Context, cfg config.PanelConfig) ([]string, error) {
 		return nil, errors.New("系统尚未安装 UFW，请先点击“一键安装 UFW”")
 	}
 
-	// 1. Pre-allow SSH + Panel + active Reality/SS ports to prevent lockout
+	// 1. Pre-allow SSH + Panel + Reality/SS + all unconfigured running system services (e.g. Caddy 80/443) to prevent service interruption
 	synced := SyncPanelPorts(ctx, cfg, true)
 
 	fwMu.Lock()
@@ -705,14 +761,54 @@ func ManagedPortSpecs(cfg config.PanelConfig, includeSSH bool) []RuleSpec {
 	return specs
 }
 
-// SyncPanelPorts ensures SSH (when includeSSH=true), Panel ListenPort, and enabled Reality / IPv6 SS ports
+// AdditionalDetectedSpecs builds ALLOW RuleSpecs for active system listening services (e.g. Caddy 80/443, Nginx, Docker)
+// that have UFWStatus == "unconfigured", strictly preserving any user-configured DENY/REJECT or source-IP restricted rules.
+func AdditionalDetectedSpecs(detected []DetectedPort, existingRules []RuleItem, managed []RuleSpec) []RuleSpec {
+	coveredManaged := make(map[string]bool, len(managed))
+	for _, m := range managed {
+		coveredManaged[m.Port] = true
+	}
+
+	var extra []RuleSpec
+	for _, dp := range detected {
+		portStr := strconv.Itoa(dp.Port)
+		if coveredManaged[portStr] {
+			continue
+		}
+		if dp.ManagedRole != "" && dp.ManagedRole != "SSH" {
+			continue
+		}
+		if dp.UFWStatus != "unconfigured" {
+			continue
+		}
+		missProto := MissingUFWProto(dp, existingRules)
+		if missProto == "" {
+			continue
+		}
+		cmt := CommentForDetectedPort(dp)
+		if dp.ManagedRole == "SSH" {
+			cmt = "SSH"
+		}
+		extra = append(extra, RuleSpec{
+			Action:  "allow",
+			Port:    portStr,
+			Proto:   missProto,
+			Comment: cmt,
+		})
+	}
+	return extra
+}
+
+// SyncPanelPorts ensures SSH (when includeSSH=true), Panel ListenPort, enabled Reality / IPv6 SS ports,
+// and unconfigured external listening system services (when includeSSH=true or firewall is active)
 // are allowed in UFW (if installed), firewalld (if running), and restrictive iptables/ip6tables chains.
-// Safe to call automatically during daemon startup, port change, or Xray reload (no-op when non-root).
+// Never auto-enables an inactive UFW firewall, and never overrides explicit DENY or source-IP restricted rules.
 func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool) []string {
 	if os.Geteuid() != 0 {
 		return nil
 	}
 
+	sshPorts := DetectSSHPorts()
 	specs := ManagedPortSpecs(cfg, includeSSH)
 
 	fwMu.Lock()
@@ -721,17 +817,34 @@ func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool
 	var applied []string
 	ufwBin := findSysBin("ufw")
 	ufwActive := false
+	defIn := ""
+	var existingRules []RuleItem
 	if ufwBin != "" {
-		if numOut, err := runCmd(ctx, ufwBin, "status"); err == nil {
-			ufwActive, _, _, _ = ParseUFWNumberedOutput(numOut)
+		if numOut, err := runCmd(ctx, ufwBin, "status", "numbered"); err == nil {
+			ufwActive, _, _, existingRules = ParseUFWNumberedOutput(numOut)
+		}
+		if verbOut, err := runCmd(ctx, ufwBin, "status", "verbose"); err == nil {
+			_, defIn, _, _ = ParseUFWNumberedOutput(verbOut)
+		}
+		if !ufwActive && len(existingRules) == 0 {
+			existingRules = parseInactiveUFWUserRules()
 		}
 	}
+
 	fwCmd := findSysBin("firewall-cmd")
 	fwCmdRunning := false
 	if fwCmd != "" {
 		if out, err := runCmd(ctx, fwCmd, "--state"); err == nil && strings.Contains(strings.ToLower(out), "running") {
 			fwCmdRunning = true
 		}
+	}
+
+	// Discover and protect other active external listening services (e.g. Caddy 80/443, Nginx, Docker)
+	// whenever explicitly syncing/enabling UFW OR whenever an active firewall is already enforcing rules.
+	if includeSSH || ufwActive || fwCmdRunning {
+		detected := DetectListeningPorts(ctx, cfg, sshPorts, existingRules, ufwActive, defIn)
+		extraSpecs := AdditionalDetectedSpecs(detected, existingRules, specs)
+		specs = append(specs, extraSpecs...)
 	}
 
 	for _, spec := range specs {
@@ -741,7 +854,7 @@ func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool
 			label = fmt.Sprintf("%s/tcp+udp", spec.Port)
 		}
 
-		// 1. UFW (if installed, works both when active and inactive)
+		// 1. UFW (if installed, works both when active and inactive without auto-enabling UFW)
 		if ufwBin != "" {
 			args := buildUFWRuleArgs(spec, true)
 			if _, err := runCmd(ctx, ufwBin, args...); err != nil {

@@ -754,17 +754,18 @@
         <div class="card-header">
           <div>
             <h2 class="card-title">VPS 系统内部防火墙 (UFW) 控制中心</h2>
-            <p class="card-desc">可视化管理 Linux UFW 防火墙。开启 UFW 或修改协议/面板端口时，面板会自动放行本机 SSH、面板及启用中的 Reality / IPv6 SS 端口，防止误锁失联。</p>
+            <p class="card-desc">可视化管理 Linux UFW 防火墙（面板不会在未经确认时自动开启 UFW）。启用 UFW 或执行同步时，将自动扫描并放行本机 SSH、Suoha 面板/节点及系统中正在运行的其他公网服务（如 Caddy 80/443、Nginx、Docker 映射端口等），确保不影响现有业务访问。</p>
           </div>
           <div class="card-actions">
             <button id="btn-fw-install" type="button" class="btn btn-primary btn-sm hidden">一键安装 UFW</button>
-            <button id="btn-fw-sync" type="button" class="btn btn-sm">一键放行本面板端口</button>
+            <button id="btn-fw-sync" type="button" class="btn btn-sm">一键放行面板与系统服务</button>
             <button id="btn-fw-enable" type="button" class="btn btn-primary btn-sm">安全启用 UFW</button>
             <button id="btn-fw-disable" type="button" class="btn btn-danger btn-sm">停用 UFW</button>
             <button id="btn-fw-refresh" type="button" class="btn btn-sm">刷新</button>
           </div>
         </div>
 
+        <div id="fw-blocked-banner" class="helper-banner danger hidden" style="margin-bottom:14px;"></div>
         <div id="fw-backend-banner" class="helper-banner hidden" style="margin-bottom:14px;"></div>
 
         <div class="kv-list">
@@ -776,10 +777,36 @@
           </div>
           <div class="kv-item">
             <div class="kv-meta">
-              <div class="kv-label">防失联保护与自动同步端口 <span class="badge-tag">自动联动</span></div>
+              <div class="kv-label">防失联保护与系统运行服务自动联动 <span class="badge-tag">防误伤保护</span></div>
               <div id="val-fw-protected" class="kv-value mono">-</div>
             </div>
           </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">系统运行服务监听端口检测 (<span id="fw-detected-count">0</span>)</h2>
+            <p class="card-desc">实时扫描本机非回环外部监听端口与 Docker 映射端口（已自动忽略 <code>127.0.0.1</code> 内部回环端口如 Caddy 管理口 <code>2019</code>、Xray 本地转发口），防止防火墙误拦 Caddy / Nginx 等其他服务导致回源超时（如 Cloudflare 522）。</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:140px;">监听端口 / 协议</th>
+                <th>占用进程 / 服务识别</th>
+                <th style="width:160px;">监听地址</th>
+                <th style="width:165px;">UFW 放行状态</th>
+                <th style="width:110px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="fw-detected-tbody">
+              <tr><td colspan="5" class="empty-placeholder">正在扫描系统监听服务端口...</td></tr>
+            </tbody>
+          </table>
         </div>
       </article>
 
@@ -829,7 +856,7 @@
           <div class="field span-2">
             <label class="field-label" for="fw-add-comment">规则备注 (可选)</label>
             <div class="input-row">
-              <input id="fw-add-comment" type="text" placeholder="例如: Reality 直连 / 自建服务" />
+              <input id="fw-add-comment" type="text" placeholder="例如: Caddy Web / 自建服务" />
               <button id="btn-fw-add-rule" type="button" class="btn btn-primary">添加规则</button>
             </div>
           </div>
