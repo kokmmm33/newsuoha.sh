@@ -140,3 +140,26 @@ New profiles: skip`
 		t.Errorf("decodeHexOrPlain failed: got %q, err=%v", decoded, err)
 	}
 }
+
+func TestManagedPortSpecsIncludesRealityWhenEnabled(t *testing.T) {
+	cfg := config.PanelConfig{
+		ListenPort: 32401,
+		Protocols: config.ProtocolConfig{
+			RealityEnabled: false,
+			RealityPort:    24443,
+		},
+	}
+
+	// Before enabling Reality: only Panel port (32401)
+	specsOff := ManagedPortSpecs(cfg, false)
+	if len(specsOff) != 1 || specsOff[0].Port != "32401" || specsOff[0].Proto != "tcp" {
+		t.Fatalf("expected only panel port 32401/tcp when Reality disabled, got %+v", specsOff)
+	}
+
+	// After enabling Reality: both 32401/tcp and 24443/tcp must be included
+	cfg.Protocols.RealityEnabled = true
+	specsOn := ManagedPortSpecs(cfg, false)
+	if len(specsOn) != 2 || specsOn[1].Port != "24443" || specsOn[1].Proto != "tcp" || specsOn[1].Comment != "Suoha-Reality" {
+		t.Fatalf("expected panel port 32401/tcp + Reality port 24443/tcp when Reality enabled, got %+v", specsOn)
+	}
+}

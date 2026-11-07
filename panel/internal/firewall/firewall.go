@@ -685,6 +685,26 @@ func ReloadUFW(ctx context.Context) error {
 	return nil
 }
 
+// ManagedPortSpecs returns the list of UFW RuleSpecs that should be allowed for the given PanelConfig.
+func ManagedPortSpecs(cfg config.PanelConfig, includeSSH bool) []RuleSpec {
+	var specs []RuleSpec
+	if includeSSH {
+		for _, sp := range DetectSSHPorts() {
+			specs = append(specs, RuleSpec{Action: "allow", Port: strconv.Itoa(sp), Proto: "tcp", Comment: "SSH"})
+		}
+	}
+	if cfg.ListenPort >= 1 && cfg.ListenPort <= 65535 {
+		specs = append(specs, RuleSpec{Action: "allow", Port: strconv.Itoa(cfg.ListenPort), Proto: "tcp", Comment: "Suoha-Panel"})
+	}
+	if cfg.Protocols.RealityEnabled && cfg.Protocols.RealityPort >= 1 && cfg.Protocols.RealityPort <= 65535 {
+		specs = append(specs, RuleSpec{Action: "allow", Port: strconv.Itoa(cfg.Protocols.RealityPort), Proto: "tcp", Comment: "Suoha-Reality"})
+	}
+	if cfg.Protocols.IPv6SSEnabled && cfg.Protocols.SSPort >= 1 && cfg.Protocols.SSPort <= 65535 {
+		specs = append(specs, RuleSpec{Action: "allow", Port: strconv.Itoa(cfg.Protocols.SSPort), Proto: "any", Comment: "Suoha-IPv6-SS"})
+	}
+	return specs
+}
+
 // SyncPanelPorts ensures SSH (when includeSSH=true), Panel ListenPort, and enabled Reality / IPv6 SS ports
 // are allowed in UFW (if installed), firewalld (if running), and restrictive iptables/ip6tables chains.
 // Safe to call automatically during daemon startup, port change, or Xray reload (no-op when non-root).
@@ -693,26 +713,7 @@ func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool
 		return nil
 	}
 
-	type portEntry struct {
-		port    int
-		proto   string // "tcp" | "any"
-		comment string
-	}
-	var entries []portEntry
-	if includeSSH {
-		for _, sp := range DetectSSHPorts() {
-			entries = append(entries, portEntry{port: sp, proto: "tcp", comment: "SSH"})
-		}
-	}
-	if cfg.ListenPort >= 1 && cfg.ListenPort <= 65535 {
-		entries = append(entries, portEntry{port: cfg.ListenPort, proto: "tcp", comment: "Suoha-Panel"})
-	}
-	if cfg.Protocols.RealityEnabled && cfg.Protocols.RealityPort >= 1 && cfg.Protocols.RealityPort <= 65535 {
-		entries = append(entries, portEntry{port: cfg.Protocols.RealityPort, proto: "tcp", comment: "Suoha-Reality"})
-	}
-	if cfg.Protocols.IPv6SSEnabled && cfg.Protocols.SSPort >= 1 && cfg.Protocols.SSPort <= 65535 {
-		entries = append(entries, portEntry{port: cfg.Protocols.SSPort, proto: "any", comment: "Suoha-IPv6-SS"})
-	}
+	specs := ManagedPortSpecs(cfg, includeSSH)
 
 	fwMu.Lock()
 	defer fwMu.Unlock()
@@ -733,20 +734,15 @@ func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool
 		}
 	}
 
-	for _, e := range entries {
-		label := fmt.Sprintf("%d/%s", e.port, e.proto)
-		if e.proto == "any" {
-			label = fmt.Sprintf("%d/tcp+udp", e.port)
+	for _, spec := range specs {
+		portNum, _ := strconv.Atoi(spec.Port)
+		label := fmt.Sprintf("%s/%s", spec.Port, spec.Proto)
+		if spec.Proto == "any" {
+			label = fmt.Sprintf("%s/tcp+udp", spec.Port)
 		}
 
 		// 1. UFW (if installed, works both when active and inactive)
 		if ufwBin != "" {
-			spec := RuleSpec{
-				Action:  "allow",
-				Port:    strconv.Itoa(e.port),
-				Proto:   e.proto,
-				Comment: e.comment,
-			}
 			args := buildUFWRuleArgs(spec, true)
 			if _, err := runCmd(ctx, ufwBin, args...); err != nil {
 				_, _ = runCmd(ctx, ufwBin, buildUFWRuleArgs(spec, false)...)
@@ -755,21 +751,21 @@ func SyncPanelPorts(ctx context.Context, cfg config.PanelConfig, includeSSH bool
 
 		// 2. firewalld (if active)
 		if fwCmdRunning {
-			if e.proto == "any" {
-				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/tcp", e.port))
-				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/udp", e.port))
+			if spec.Proto == "any" {
+				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/tcp", portNum))
+				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/udp", portNum))
 			} else {
-				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/%s", e.port, e.proto))
+				_, _ = runCmd(ctx, fwCmd, "--permanent", fmt.Sprintf("--add-port=%d/%s", portNum, spec.Proto))
 			}
 		}
 
 		// 3. Restrictive raw iptables / ip6tables (e.g., Oracle Cloud REJECT rules when neither UFW nor firewalld is active)
 		if !ufwActive && !fwCmdRunning {
-			ensureRestrictiveIPTablesAccept(ctx, "iptables", e.port, e.proto)
-			ensureRestrictiveIPTablesAccept(ctx, "ip6tables", e.port, e.proto)
+			ensureRestrictiveIPTablesAccept(ctx, "iptables", portNum, spec.Proto)
+			ensureRestrictiveIPTablesAccept(ctx, "ip6tables", portNum, spec.Proto)
 		}
 
-		applied = append(applied, fmt.Sprintf("%s (%s)", label, e.comment))
+		applied = append(applied, fmt.Sprintf("%s (%s)", label, spec.Comment))
 	}
 
 	if fwCmdRunning {

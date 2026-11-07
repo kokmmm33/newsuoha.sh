@@ -1072,6 +1072,11 @@
 
     $("btn-refresh-all").addEventListener("click", () => {
       loadOverview(true);
+      if (state.activeTab === "firewall") {
+        loadFirewallStatus();
+      } else if (state.activeTab === "settings") {
+        loadLogs();
+      }
       showToast("数据已刷新");
     });
 

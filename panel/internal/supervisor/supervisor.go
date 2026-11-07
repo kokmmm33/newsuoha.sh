@@ -228,6 +228,12 @@ func (m *Manager) ReloadXray() error {
 		proto = cfg.Protocols
 	}
 
+	if proto.RealityEnabled || proto.IPv6SSEnabled {
+		if synced := firewall.SyncPanelPorts(context.Background(), cfg, false); len(synced) > 0 {
+			m.logs.Add("panel", "系统防火墙已自动同步放行端口: "+strings.Join(synced, ", "))
+		}
+	}
+
 	cfgPath, err := m.writeXrayConfig(proto)
 	if err != nil {
 		return err
