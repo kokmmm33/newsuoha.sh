@@ -202,6 +202,8 @@
       }
       if (state.activeTab === "settings") {
         loadLogs();
+      } else if (hydrateForms && state.activeTab === "firewall") {
+        loadFirewallStatus();
       }
     } catch (err) {
       if (hydrateForms) {
@@ -793,6 +795,172 @@
     } catch (_) {}
   }
 
+  // ==================== VPS Firewall (UFW) ====================
+  function renderFirewallState(fw) {
+    if (!fw) return;
+    const installBtn = $("btn-fw-install");
+    const enableBtn = $("btn-fw-enable");
+    const disableBtn = $("btn-fw-disable");
+    const syncBtn = $("btn-fw-sync");
+    const banner = $("fw-backend-banner");
+
+    if (installBtn) installBtn.classList.toggle("hidden", !!fw.ufw_installed);
+    if (enableBtn) enableBtn.disabled = !fw.ufw_installed || !!fw.ufw_active;
+    if (disableBtn) disableBtn.disabled = !fw.ufw_installed || !fw.ufw_active;
+    if (syncBtn) syncBtn.disabled = !fw.is_root;
+
+    const bannerNotes = [];
+    if (!fw.is_root) {
+      bannerNotes.push("当前面板未以 root 用户运行，防火墙读取与修改受限。");
+    } else if (!fw.ufw_installed) {
+      bannerNotes.push("检测到系统尚未安装 UFW，可点击右上角「一键安装 UFW」自动安装（安装过程不会中断现有连接）。");
+    }
+    if (fw.other_backend) {
+      bannerNotes.push(fw.other_backend);
+    }
+    if (banner) {
+      if (bannerNotes.length) {
+        banner.textContent = bannerNotes.join("  |  ");
+        banner.classList.remove("hidden");
+      } else {
+        banner.classList.add("hidden");
+      }
+    }
+
+    const stEl = $("val-fw-state");
+    if (stEl) {
+      if (!fw.ufw_installed) {
+        stEl.textContent = "未安装 UFW (系统端口当前无 UFW 拦截)";
+      } else if (fw.ufw_active) {
+        const defIn = fw.default_incoming || "deny";
+        const defOut = fw.default_outgoing || "allow";
+        stEl.textContent = `运行中 (Active)  |  默认入站: ${defIn}  ·  默认出站: ${defOut}`;
+      } else {
+        stEl.textContent = "未启用 (Inactive)  |  点击右上角「安全启用 UFW」将自动放行保护端口后开启防护";
+      }
+    }
+
+    const protEl = $("val-fw-protected");
+    if (protEl) {
+      const sshStr = (fw.detected_ssh_ports || [22]).map((p) => `${p}/tcp`).join(", ");
+      const parts = [`SSH: ${sshStr}`, `面板与订阅: ${fw.panel_port}/tcp`];
+      if (fw.reality_enabled) {
+        parts.push(`Reality 直连: ${fw.reality_port}/tcp (已联动放行)`);
+      } else {
+        parts.push(`Reality 直连: ${fw.reality_port}/tcp (开启时自动放行)`);
+      }
+      if (fw.ss_enabled) {
+        parts.push(`IPv6 SS: ${fw.ss_port}/tcp+udp (已联动放行)`);
+      }
+      protEl.textContent = parts.join("  |  ");
+    }
+
+    const rules = fw.rules || [];
+    $("fw-rules-count").textContent = String(rules.length);
+    const tbody = $("fw-rules-tbody");
+    if (!tbody) return;
+
+    if (!fw.ufw_installed) {
+      tbody.innerHTML =
+        '<tr><td colspan="6" class="empty-placeholder">尚未安装 UFW 组件，点击右上角「一键安装 UFW」即可使用可视化规则管理</td></tr>';
+      return;
+    }
+    if (!rules.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="6" class="empty-placeholder">当前暂无 UFW 规则，可点击「一键放行本面板端口」或在上方添加端口规则</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rules
+      .map((r) => {
+        const idxDisp = r.index > 0 ? `[${r.index}]` : "预设";
+        const v6Tag = r.ipv6 ? ' <span class="badge-tag">v6</span>' : "";
+        const roleTag = r.role
+          ? ` <span class="badge-proto ${r.protected ? "vless" : "reality"}" style="margin-left:4px;">${escapeHTML(r.role)}</span>`
+          : "";
+        const actUpper = String(r.action || "").toUpperCase();
+        const actClass = actUpper.indexOf("ALLOW") === 0 ? "ss" : "trojan";
+        const delBtn =
+          r.index > 0
+            ? `<button type="button" class="btn ${r.protected ? "btn-sm" : "btn-danger btn-sm"}" data-fw-del="${r.index}" data-fw-prot="${r.protected ? "1" : "0"}" data-fw-role="${escapeHTML(r.role || "")}" data-fw-to="${escapeHTML(r.to)}">删除</button>`
+            : '<span style="font-size:12px;color:var(--text-muted);">启用后可删</span>';
+
+        return `<tr>
+          <td class="mono">${escapeHTML(idxDisp)}</td>
+          <td class="mono">${escapeHTML(r.to)}${v6Tag}${roleTag}</td>
+          <td><span class="badge-proto ${actClass}">${escapeHTML(r.action)}</span></td>
+          <td class="mono">${escapeHTML(r.from || "Anywhere")}</td>
+          <td style="font-size:12.5px;color:var(--text-secondary);">${escapeHTML(r.comment || "-")}</td>
+          <td style="text-align:right;">${delBtn}</td>
+        </tr>`;
+      })
+      .join("");
+
+    tbody.querySelectorAll("[data-fw-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const ruleIdx = Number(btn.getAttribute("data-fw-del"));
+        const isProt = btn.getAttribute("data-fw-prot") === "1";
+        const role = btn.getAttribute("data-fw-role") || "核心";
+        const toPort = btn.getAttribute("data-fw-to") || "";
+
+        let force = false;
+        if (isProt) {
+          const ok = window.confirm(
+            `⚠️ 高危警告：规则 [${ruleIdx}] (${toPort}) 是当前正在使用的【${role}】保护规则！\n若无其他放行规则，删除后可能导致 SSH 或面板立即无法连接。\n确定要强制删除吗？`
+          );
+          if (!ok) return;
+          force = true;
+        } else {
+          if (!window.confirm(`确定删除 UFW 规则 [${ruleIdx}] (${toPort}) 吗？`)) return;
+        }
+
+        btn.disabled = true;
+        try {
+          const res = await apiFetch("/api/admin/firewall/rule/delete", {
+            method: "POST",
+            body: JSON.stringify({ index: ruleIdx, force })
+          });
+          renderFirewallState(res.firewall);
+          showToast(`已删除防火墙规则 [${ruleIdx}]`);
+        } catch (err) {
+          showToast(err.message, true);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  async function loadFirewallStatus() {
+    try {
+      const res = await apiFetch("/api/admin/firewall/status", { method: "GET" });
+      renderFirewallState(res.firewall);
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  async function execFirewallAction(action, confirmMsg, successMsg) {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    const btns = ["btn-fw-install", "btn-fw-sync", "btn-fw-enable", "btn-fw-disable"];
+    btns.forEach((id) => {
+      if ($(id)) $(id).disabled = true;
+    });
+    try {
+      if (action === "install") {
+        showToast("正在调用系统包管理器安装 UFW，可能需要数秒至数十秒...");
+      }
+      const res = await apiFetch("/api/admin/firewall/action", {
+        method: "POST",
+        body: JSON.stringify({ action })
+      });
+      renderFirewallState(res.firewall);
+      showToast(successMsg || "防火墙操作已生效");
+    } catch (err) {
+      showToast(err.message, true);
+      await loadFirewallStatus();
+    }
+  }
+
   // ==================== Tunnel Mode UI Helpers ====================
   function setTunnelModeUI(mode) {
     state.tunnelMode = mode === "token" ? "token" : "quick";
@@ -913,11 +1081,13 @@
         const target = tab.getAttribute("data-tab");
         state.activeTab = target;
         document.querySelectorAll(".nav-tab").forEach((t) => t.classList.toggle("active", t === tab));
-        ["tunnel", "sub", "protocols", "preferred", "settings"].forEach((name) => {
+        ["tunnel", "sub", "protocols", "preferred", "firewall", "settings"].forEach((name) => {
           $("pane-" + name).classList.toggle("hidden", name !== target);
         });
         if (target === "settings") {
           loadLogs();
+        } else if (target === "firewall") {
+          loadFirewallStatus();
         }
       });
     });
@@ -1257,6 +1427,96 @@
       } catch (err) {
         showToast(err.message, true);
       }
+    });
+
+    // Firewall (UFW) Actions
+    $("btn-fw-refresh").addEventListener("click", () => {
+      loadFirewallStatus();
+      showToast("防火墙状态已刷新");
+    });
+
+    $("btn-fw-install").addEventListener("click", () =>
+      execFirewallAction("install", "确定要在服务器上安装 UFW 防火墙组件吗？", "UFW 安装完成")
+    );
+
+    $("btn-fw-sync").addEventListener("click", () =>
+      execFirewallAction("sync", "", "已同步放行 SSH、面板及启用中的节点端口")
+    );
+
+    $("btn-fw-enable").addEventListener("click", () =>
+      execFirewallAction(
+        "enable",
+        "启用 UFW 前，面板将自动放行本机 SSH 端口、面板监听端口及已启用的 Reality / SS 端口以防失联。\n确定启用 UFW 防火墙吗？",
+        "UFW 防火墙已安全启用"
+      )
+    );
+
+    $("btn-fw-disable").addEventListener("click", () =>
+      execFirewallAction("disable", "确定要停用 UFW 系统防火墙吗？（已有规则将保留）", "UFW 防火墙已停用")
+    );
+
+    document.querySelectorAll("#fw-quick-pills .port-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const role = pill.getAttribute("data-fw-role");
+        const cfg = (state.overview && state.overview.config) || {};
+        const proto = cfg.protocols || {};
+        if (role === "panel") {
+          $("fw-add-action").value = "allow";
+          $("fw-add-port").value = String(cfg.listen_port || 25000);
+          $("fw-add-proto").value = "tcp";
+          $("fw-add-comment").value = "Suoha-Panel";
+        } else if (role === "reality") {
+          $("fw-add-action").value = "allow";
+          $("fw-add-port").value = String(proto.reality_port || 24443);
+          $("fw-add-proto").value = "tcp";
+          $("fw-add-comment").value = "Suoha-Reality";
+        } else {
+          $("fw-add-action").value = "allow";
+          $("fw-add-port").value = pill.getAttribute("data-fw-port") || "";
+          $("fw-add-proto").value = pill.getAttribute("data-fw-proto") || "tcp";
+          $("fw-add-comment").value = pill.getAttribute("data-fw-cmt") || "";
+        }
+      });
+    });
+
+    const submitAddFwRule = async () => {
+      const portVal = $("fw-add-port").value.trim();
+      if (!portVal) {
+        showToast("请输入要操作的端口或端口段 (例如 443 或 10000:20000)", true);
+        return;
+      }
+      const btn = $("btn-fw-add-rule");
+      btn.disabled = true;
+      try {
+        const res = await apiFetch("/api/admin/firewall/rule/add", {
+          method: "POST",
+          body: JSON.stringify({
+            action: $("fw-add-action").value || "allow",
+            port: portVal,
+            proto: $("fw-add-proto").value || "tcp",
+            from: $("fw-add-from").value.trim(),
+            comment: $("fw-add-comment").value.trim()
+          })
+        });
+        $("fw-add-port").value = "";
+        $("fw-add-comment").value = "";
+        renderFirewallState(res.firewall);
+        showToast("UFW 防火墙规则已添加");
+      } catch (err) {
+        showToast(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    $("btn-fw-add-rule").addEventListener("click", submitAddFwRule);
+    ["fw-add-port", "fw-add-from", "fw-add-comment"].forEach((id) => {
+      $(id).addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submitAddFwRule();
+        }
+      });
     });
 
     // Logs & Settings Actions

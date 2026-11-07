@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/config"
+	"github.com/kokmmm33/newsuoha.sh/panel/internal/firewall"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/proxy"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/subgen"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/supervisor"
@@ -360,6 +361,14 @@ func (h *Handler) serveAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleRotateCredential(w, r)
 	case r.URL.Path == "/api/admin/settings" && r.Method == http.MethodPost:
 		h.handleSettingsSave(w, r)
+	case r.URL.Path == "/api/admin/firewall/status" && r.Method == http.MethodGet:
+		h.handleFirewallStatus(w, r)
+	case r.URL.Path == "/api/admin/firewall/action" && r.Method == http.MethodPost:
+		h.handleFirewallAction(w, r)
+	case r.URL.Path == "/api/admin/firewall/rule/add" && r.Method == http.MethodPost:
+		h.handleFirewallRuleAdd(w, r)
+	case r.URL.Path == "/api/admin/firewall/rule/delete" && r.Method == http.MethodPost:
+		h.handleFirewallRuleDelete(w, r)
 	case r.URL.Path == "/api/admin/logs" && r.Method == http.MethodGet:
 		src := r.URL.Query().Get("source")
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -844,6 +853,12 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if portChanged {
+		if synced := firewall.SyncPanelPorts(r.Context(), newCfg, false); len(synced) > 0 {
+			h.mgr.Logs().Add("panel", "面板端口切换，系统防火墙已自动放行: "+strings.Join(synced, ", "))
+		}
+	}
+
 	// If listen port changed and Quick Tunnel was pointing at ListenPort, restart tunnel smoothly
 	if portChanged && (newCfg.Tunnel.PanelQuickTunnel || (newCfg.Tunnel.Enabled && newCfg.Tunnel.Mode == "quick" && newCfg.Tunnel.QuickTopology == "unified")) {
 		go func() {
@@ -857,6 +872,114 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"ok":           true,
 		"port_changed": portChanged,
 		"listen_port":  newCfg.ListenPort,
+	})
+}
+
+func (h *Handler) handleFirewallStatus(w http.ResponseWriter, r *http.Request) {
+	cfg := h.store.GetConfig()
+	st := firewall.GetStatus(r.Context(), cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"firewall": st,
+	})
+}
+
+func (h *Handler) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"` // "enable" | "disable" | "reload" | "sync" | "install"
+	}
+	if err := decodeJSONBody(r, &req, 8*1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "防火墙请求参数无效"})
+		return
+	}
+
+	cfg := h.store.GetConfig()
+	act := strings.ToLower(strings.TrimSpace(req.Action))
+	var synced []string
+
+	switch act {
+	case "install":
+		if err := firewall.InstallUFW(r.Context()); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		h.mgr.Logs().Add("panel", "已完成系统 UFW 防火墙组件安装")
+	case "enable":
+		var err error
+		synced, err = firewall.EnableUFW(r.Context(), cfg)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		h.mgr.Logs().Add("panel", "已安全启用 UFW 防火墙并自动放行保护端口: "+strings.Join(synced, ", "))
+	case "disable":
+		if err := firewall.DisableUFW(r.Context()); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		h.mgr.Logs().Add("panel", "已停用 UFW 系统防火墙")
+	case "reload":
+		if err := firewall.ReloadUFW(r.Context()); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		h.mgr.Logs().Add("panel", "已重载 UFW 防火墙规则")
+	case "sync":
+		synced = firewall.SyncPanelPorts(r.Context(), cfg, true)
+		if len(synced) > 0 {
+			h.mgr.Logs().Add("panel", "已一键同步放行面板及节点端口: "+strings.Join(synced, ", "))
+		}
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "不支持的防火墙操作: " + req.Action})
+		return
+	}
+
+	st := firewall.GetStatus(r.Context(), cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"synced":   synced,
+		"firewall": st,
+	})
+}
+
+func (h *Handler) handleFirewallRuleAdd(w http.ResponseWriter, r *http.Request) {
+	var spec firewall.RuleSpec
+	if err := decodeJSONBody(r, &spec, 16*1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "规则参数格式无效"})
+		return
+	}
+	if err := firewall.AddRule(r.Context(), spec); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	cfg := h.store.GetConfig()
+	h.mgr.Logs().Add("panel", fmt.Sprintf("UFW 新增规则: %s %s/%s", spec.Action, spec.Port, spec.Proto))
+	st := firewall.GetStatus(r.Context(), cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"firewall": st,
+	})
+}
+
+func (h *Handler) handleFirewallRuleDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Index int  `json:"index"`
+		Force bool `json:"force"`
+	}
+	if err := decodeJSONBody(r, &req, 8*1024); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "删除规则参数无效"})
+		return
+	}
+	cfg := h.store.GetConfig()
+	if err := firewall.DeleteRule(r.Context(), req.Index, cfg, req.Force); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	h.mgr.Logs().Add("panel", fmt.Sprintf("UFW 已删除规则编号 [%d]", req.Index))
+	st := firewall.GetStatus(r.Context(), cfg)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"firewall": st,
 	})
 }
 

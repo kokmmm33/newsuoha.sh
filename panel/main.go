@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/config"
+	"github.com/kokmmm33/newsuoha.sh/panel/internal/firewall"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/server"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/subgen"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/supervisor"
@@ -30,7 +31,7 @@ const defaultDataDir = "/opt/suoha"
 func main() {
 	cmd := "serve"
 	args := os.Args[1:]
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+	if len(args) > 0 && (!strings.HasPrefix(args[0], "-") || args[0] == "-h" || args[0] == "--help") {
 		cmd = args[0]
 		args = args[1:]
 	}
@@ -50,6 +51,8 @@ func main() {
 		runArgoPanelToggle(args)
 	case "reality":
 		runReality(args)
+	case "firewall", "ufw":
+		runFirewall(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -67,10 +70,12 @@ func printUsage() {
   suoha-panel init [-data-dir /opt/suoha]           初始化配置(自动兼容迁移旧版数据)并输出初始凭据
   suoha-panel info [-data-dir /opt/suoha]           查看当前面板地址、订阅链接与客户端命令
   suoha-panel reset-password [-user X] [-password Y] 重置管理员账号与登录密码(不指定密码则随机生成)
-  suoha-panel set-port [-data-dir /opt/suoha] <端口> 修改面板与订阅共用固定监听端口
+  suoha-panel set-port [-data-dir /opt/suoha] <端口> 修改面板与订阅共用固定监听端口(自动放行防火墙)
   suoha-panel argo-panel <on|off>                   开启或关闭通过 Argo 隧道域名访问管理面板
   suoha-panel reality <status|on|off|sni|port|rekey|scan> [参数]
-                                                    管理 VLESS+Reality+Vision 直连节点与扫描可用 SNI 域名`)
+                                                    管理 VLESS+Reality+Vision 直连节点与扫描可用 SNI 域名
+  suoha-panel ufw <status|sync|enable|disable|allow|deny|limit|delete|install> [参数]
+                                                    管理 VPS 系统内部 UFW 防火墙与端口放行规则`)
 }
 
 func openStore(dataDir string, noLegacy bool) *config.Store {
@@ -232,6 +237,7 @@ func runInit(args []string) {
 		}
 	}
 
+	_ = firewall.SyncPanelPorts(context.Background(), store.GetConfig(), false)
 	printPanelSummary(store, shownPassword)
 }
 
@@ -298,12 +304,15 @@ func runSetPort(args []string) {
 	}
 
 	store := openStore(*dataDir, *noLegacy)
-	_, err = store.UpdateConfig(func(d *config.PanelConfig) error {
+	updatedCfg, err := store.UpdateConfig(func(d *config.PanelConfig) error {
 		d.ListenPort = p
 		return nil
 	})
 	if err != nil {
 		log.Fatalf("[错误] 保存端口失败: %v", err)
+	}
+	if synced := firewall.SyncPanelPorts(context.Background(), updatedCfg, false); len(synced) > 0 {
+		fmt.Printf("系统防火墙已自动同步放行端口: %s\n", strings.Join(synced, ", "))
 	}
 	fmt.Printf("监听端口已更新为 %d (重启 suoha-panel 服务后生效)\n", p)
 }
@@ -372,7 +381,7 @@ func runReality(args []string) {
 		if newPort == cur.ListenPort {
 			log.Fatalf("[错误] Reality 端口 (%d) 不能与面板监听端口相同", newPort)
 		}
-		_, err := store.UpdateConfig(func(d *config.PanelConfig) error {
+		updatedCfg, err := store.UpdateConfig(func(d *config.PanelConfig) error {
 			d.Protocols.RealityEnabled = true
 			d.Protocols.RealityPort = newPort
 			d.Protocols.RealitySNI = newSNI
@@ -380,6 +389,9 @@ func runReality(args []string) {
 		})
 		if err != nil {
 			log.Fatalf("[错误] 开启 Reality 失败: %v", err)
+		}
+		if synced := firewall.SyncPanelPorts(context.Background(), updatedCfg, false); len(synced) > 0 {
+			fmt.Printf("系统防火墙已自动同步放行端口: %s\n", strings.Join(synced, ", "))
 		}
 		fmt.Printf("已开启 VLESS + Reality + XTLS-RPRX-Vision 直连节点 (端口 :%d | SNI: %s)\n", newPort, newSNI)
 		printRealitySummary(store)
@@ -423,14 +435,17 @@ func runReality(args []string) {
 		if p == cur.ListenPort {
 			log.Fatalf("[错误] Reality 监听端口 (%d) 不能与面板监听端口相同", p)
 		}
-		_, err = store.UpdateConfig(func(d *config.PanelConfig) error {
+		updatedCfg, err := store.UpdateConfig(func(d *config.PanelConfig) error {
 			d.Protocols.RealityPort = p
 			return nil
 		})
 		if err != nil {
 			log.Fatalf("[错误] 保存 Reality 端口失败: %v", err)
 		}
-		fmt.Printf("已将 Reality 监听端口更新为 %d (重启 suoha-panel 服务后生效，请放行防火墙端口)\n", p)
+		if synced := firewall.SyncPanelPorts(context.Background(), updatedCfg, false); len(synced) > 0 {
+			fmt.Printf("系统防火墙已自动同步放行端口: %s\n", strings.Join(synced, ", "))
+		}
+		fmt.Printf("已将 Reality 监听端口更新为 %d (重启 suoha-panel 服务后生效)\n", p)
 
 	case "rekey", "rotate":
 		priv, pub, err := config.GenerateRealityKeyPair()
@@ -509,6 +524,172 @@ func runReality(args []string) {
 	default:
 		log.Fatalf("用法: suoha-panel reality <status|on|off|sni <域名>|port <端口>|rekey|scan [preset|neighbor|域名]>")
 	}
+}
+
+func runFirewall(args []string) {
+	fs := flag.NewFlagSet("ufw", flag.ExitOnError)
+	dataDir := fs.String("data-dir", defaultDataDir, "面板数据目录")
+	noLegacy := fs.Bool("no-legacy-sync", false, "禁用旧版文件同步")
+	_ = fs.Parse(args)
+
+	rest := fs.Args()
+	action := "status"
+	if len(rest) > 0 {
+		action = strings.ToLower(strings.TrimSpace(rest[0]))
+	}
+
+	store := openStore(*dataDir, *noLegacy)
+	cfg := store.GetConfig()
+	ctx := context.Background()
+
+	switch action {
+	case "status", "info", "list":
+		printFirewallSummary(ctx, cfg)
+
+	case "install":
+		fmt.Println("正在检测并安装系统 UFW 防火墙组件...")
+		if err := firewall.InstallUFW(ctx); err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Println("UFW 防火墙组件已安装就绪。")
+		printFirewallSummary(ctx, cfg)
+
+	case "sync":
+		synced := firewall.SyncPanelPorts(ctx, cfg, true)
+		if len(synced) == 0 {
+			fmt.Println("提示: 当前未以 root 运行或无端口需要同步。")
+		} else {
+			fmt.Printf("已一键同步放行系统防火墙端口: %s\n", strings.Join(synced, ", "))
+		}
+		printFirewallSummary(ctx, cfg)
+
+	case "enable", "on":
+		synced, err := firewall.EnableUFW(ctx, cfg)
+		if err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Printf("UFW 防火墙已安全启用 (已自动预放行保护端口: %s)\n", strings.Join(synced, ", "))
+		printFirewallSummary(ctx, cfg)
+
+	case "disable", "off":
+		if err := firewall.DisableUFW(ctx); err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Println("UFW 防火墙已停用（规则配置仍保留）。")
+		printFirewallSummary(ctx, cfg)
+
+	case "reload":
+		if err := firewall.ReloadUFW(ctx); err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Println("UFW 防火墙规则已重载。")
+
+	case "allow", "deny", "reject", "limit":
+		if len(rest) < 2 {
+			log.Fatalf("用法: suoha-panel ufw %s <端口或端口段[/tcp|/udp]> [备注]", action)
+		}
+		cmt := ""
+		if len(rest) >= 3 {
+			cmt = strings.Join(rest[2:], " ")
+		}
+		spec := firewall.RuleSpec{
+			Action:  action,
+			Port:    rest[1],
+			Proto:   "any",
+			Comment: cmt,
+		}
+		if err := firewall.AddRule(ctx, spec); err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Printf("已添加 UFW 规则: %s %s\n", strings.ToUpper(action), rest[1])
+		printFirewallSummary(ctx, cfg)
+
+	case "delete", "del", "rm":
+		if len(rest) < 2 {
+			log.Fatalf("用法: suoha-panel ufw delete <规则编号> [--force]")
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(rest[1]))
+		if err != nil || idx < 1 {
+			log.Fatalf("[错误] 规则编号无效: %s", rest[1])
+		}
+		force := false
+		for _, tok := range rest[2:] {
+			if tok == "--force" || tok == "-f" {
+				force = true
+			}
+		}
+		if err := firewall.DeleteRule(ctx, idx, cfg, force); err != nil {
+			log.Fatalf("[错误] %v (如需强制删除受保护规则可附加 --force)", err)
+		}
+		fmt.Printf("已删除 UFW 规则编号 [%d]\n", idx)
+		printFirewallSummary(ctx, cfg)
+
+	default:
+		log.Fatalf("用法: suoha-panel ufw <status|sync|enable|disable|reload|allow <端口>|deny <端口>|limit <端口>|delete <编号>|install>")
+	}
+}
+
+func printFirewallSummary(ctx context.Context, cfg config.PanelConfig) {
+	st := firewall.GetStatus(ctx, cfg)
+	stateText := "未安装 UFW (可执行 `suoha ufw install` 安装)"
+	if st.UFWInstalled {
+		if !st.IsRoot {
+			stateText = "已安装 (需 root 权限读取实时规则)"
+		} else if st.UFWActive {
+			stateText = fmt.Sprintf("运行中 (active) | 入站默认: %s | 出站默认: %s",
+				strings.ToUpper(st.DefaultIncoming), strings.ToUpper(st.DefaultOutgoing))
+		} else {
+			stateText = "已安装但未启用 (inactive)"
+		}
+	}
+
+	sshStrs := make([]string, 0, len(st.DetectedSSHPorts))
+	for _, p := range st.DetectedSSHPorts {
+		sshStrs = append(sshStrs, fmt.Sprintf("%d/tcp", p))
+	}
+
+	fmt.Println("==========================================================================")
+	fmt.Println("                     VPS 系统内部防火墙 (UFW) 状态                        ")
+	fmt.Println("==========================================================================")
+	fmt.Printf("UFW 状态       : %s\n", stateText)
+	fmt.Printf("防失联保护端口 : SSH [%s] | 面板 [%d/tcp]", strings.Join(sshStrs, ", "), st.PanelPort)
+	if st.RealityEnabled {
+		fmt.Printf(" | Reality [%d/tcp]", st.RealityPort)
+	}
+	if st.SSEnabled {
+		fmt.Printf(" | IPv6-SS [%d/tcp+udp]", st.SSPort)
+	}
+	fmt.Println()
+	if st.OtherBackend != "" {
+		fmt.Printf("底层防火墙提示 : %s\n", st.OtherBackend)
+	}
+	if len(st.Rules) > 0 {
+		fmt.Println("--------------------------------------------------------------------------")
+		fmt.Printf("%-6s %-22s %-12s %-18s %s\n", "编号", "目标端口/协议", "动作", "来源地址", "角色/备注")
+		fmt.Println("--------------------------------------------------------------------------")
+		for _, r := range st.Rules {
+			idxLabel := "-"
+			if r.Index > 0 {
+				idxLabel = fmt.Sprintf("[%d]", r.Index)
+			}
+			toLabel := r.To
+			if r.IPv6 {
+				toLabel += " (v6)"
+			}
+			noteParts := []string{}
+			if r.Role != "" {
+				noteParts = append(noteParts, "["+r.Role+"]")
+			}
+			if r.Comment != "" {
+				noteParts = append(noteParts, r.Comment)
+			}
+			fmt.Printf("%-6s %-22s %-12s %-18s %s\n", idxLabel, toLabel, r.Action, r.From, strings.Join(noteParts, " "))
+		}
+	} else if st.UFWInstalled && st.IsRoot {
+		fmt.Println("--------------------------------------------------------------------------")
+		fmt.Println("暂无已配置的 UFW 端口规则（可执行 `suoha ufw sync` 一键同步放行节点端口）")
+	}
+	fmt.Println("==========================================================================")
 }
 
 func printRealitySummary(store *config.Store) {

@@ -386,7 +386,7 @@ reality_submenu() {
                 [ -n "${r_sni:-}" ] && args+=("$r_sni")
                 if "$PANEL_BIN" reality -data-dir "$DATA_DIR" "${args[@]}"; then
                     service_restart
-                    ok "Reality 直连节点已开启并完成服务热同步（请确认防火墙放行对应 TCP 端口）。"
+                    ok "Reality 直连节点已开启并完成服务热同步（系统内部防火墙已自动放行对应 TCP 端口）。"
                 fi
                 ;;
             3)
@@ -415,13 +415,82 @@ reality_submenu() {
                 read -r -p "请输入新的 Reality 监听端口号 (1-65535): " new_rport
                 if "$PANEL_BIN" reality -data-dir "$DATA_DIR" port "$new_rport"; then
                     service_restart
-                    ok "Reality 监听端口已更新并重启生效。"
+                    ok "Reality 监听端口已更新并自动放行系统防火墙。"
                 fi
                 ;;
             8)
                 if "$PANEL_BIN" reality -data-dir "$DATA_DIR" rekey; then
                     service_restart
                     ok "Reality 密钥对与 ShortID 已重置，客户端更新订阅即可同步。"
+                fi
+                ;;
+            0)
+                return
+                ;;
+            *)
+                warn "请输入有效的编号 [0-8]"
+                ;;
+        esac
+    done
+}
+
+firewall_submenu() {
+    while true; do
+        echo ""
+        echo "----------------------------------------------------------"
+        echo "          VPS 系统内部防火墙 (UFW) 可视化终端管理         "
+        echo "----------------------------------------------------------"
+        echo " 1. 查看 UFW 防火墙状态、保护端口与规则列表"
+        echo " 2. 一键安装 UFW 系统防火墙组件 (apt/apk/dnf/yum)"
+        echo " 3. 一键同步放行 SSH + 面板 + Reality/SS 端口"
+        echo " 4. 安全启用 UFW 防火墙 (自动预放行 SSH 与面板防失联)"
+        echo " 5. 关闭停用 UFW 防火墙 (保留已有规则配置)"
+        echo " 6. 手动放行自定义端口 / 端口段 (ALLOW)"
+        echo " 7. 拦截封禁指定端口 (DENY)"
+        echo " 8. 按规则编号删除指定 UFW 规则"
+        echo " 0. 返回主菜单"
+        echo "----------------------------------------------------------"
+        read -r -p "请选择操作 [0-8]: " fw_choice
+
+        case "${fw_choice:-0}" in
+            1)
+                echo ""
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" status
+                ;;
+            2)
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" install
+                ;;
+            3)
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" sync
+                ;;
+            4)
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" enable
+                ;;
+            5)
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" disable
+                ;;
+            6)
+                read -r -p "输入要放行的端口或端口段 (如 443、8080/tcp、10000:20000/udp): " fw_port
+                if [ -n "${fw_port:-}" ]; then
+                    read -r -p "可选备注说明 (直接回车留空): " fw_cmt
+                    if [ -n "${fw_cmt:-}" ]; then
+                        "$PANEL_BIN" ufw -data-dir "$DATA_DIR" allow "$fw_port" "$fw_cmt"
+                    else
+                        "$PANEL_BIN" ufw -data-dir "$DATA_DIR" allow "$fw_port"
+                    fi
+                fi
+                ;;
+            7)
+                read -r -p "输入要拦截封禁的端口 (如 3306/tcp): " fw_deny_port
+                if [ -n "${fw_deny_port:-}" ]; then
+                    "$PANEL_BIN" ufw -data-dir "$DATA_DIR" deny "$fw_deny_port"
+                fi
+                ;;
+            8)
+                "$PANEL_BIN" ufw -data-dir "$DATA_DIR" status
+                read -r -p "输入要删除的规则编号 [数字]: " fw_idx
+                if [ -n "${fw_idx:-}" ]; then
+                    "$PANEL_BIN" ufw -data-dir "$DATA_DIR" delete "$fw_idx"
                 fi
                 ;;
             0)
@@ -457,14 +526,15 @@ interactive_menu() {
         echo " 3. 修改面板与订阅共用监听端口"
         echo " 4. 开启 / 关闭 Argo 隧道穿透访问面板后台"
         echo " 5. 管理 VLESS+Reality+Vision 直连节点 (开关/扫描/设置SNI)"
-        echo " 6. 重启面板服务"
-        echo " 7. 启动面板服务"
-        echo " 8. 停止面板服务"
-        echo " 9. 更新面板二进制内核 (保留配置)"
-        echo " 10. 彻底卸载面板与清理数据"
+        echo " 6. 管理 VPS 系统内部防火墙 (UFW 开关 / 放行端口 / 规则列表)"
+        echo " 7. 重启面板服务"
+        echo " 8. 启动面板服务"
+        echo " 9. 停止面板服务"
+        echo " 10. 更新面板二进制内核 (保留配置)"
+        echo " 11. 彻底卸载面板与清理数据"
         echo " 0. 退出"
         echo "=========================================================="
-        read -r -p "请选择操作 [0-10]: " choice
+        read -r -p "请选择操作 [0-11]: " choice
 
         case "${choice:-0}" in
             1)
@@ -496,21 +566,24 @@ interactive_menu() {
                 reality_submenu
                 ;;
             6)
+                firewall_submenu
+                ;;
+            7)
                 service_restart
                 ok "面板服务已重启。"
                 ;;
-            7)
+            8)
                 service_start
                 ok "面板服务已启动。"
                 ;;
-            8)
+            9)
                 service_stop
                 warn "面板服务已停止。"
                 ;;
-            9)
+            10)
                 do_update
                 ;;
-            10)
+            11)
                 do_uninstall
                 exit 0
                 ;;
@@ -518,7 +591,7 @@ interactive_menu() {
                 exit 0
                 ;;
             *)
-                warn "请输入有效的菜单编号 [0-10]"
+                warn "请输入有效的菜单编号 [0-11]"
                 ;;
         esac
     done
@@ -566,6 +639,11 @@ main() {
                     ;;
             esac
             ;;
+        ufw | firewall)
+            require_root
+            shift
+            "$PANEL_BIN" ufw -data-dir "$DATA_DIR" "$@"
+            ;;
         start)
             require_root
             service_start
@@ -592,7 +670,7 @@ main() {
             fi
             ;;
         *)
-            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <on|off>|reality <status|on|off|sni|port|rekey|scan>|start|stop|restart|update|uninstall]"
+            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <on|off>|reality <status|on|off|sni|port|rekey|scan>|ufw <status|sync|enable|disable|allow|deny|delete|install>|start|stop|restart|update|uninstall]"
             exit 1
             ;;
     esac

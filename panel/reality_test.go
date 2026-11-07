@@ -403,4 +403,40 @@ func TestRealityDomainScannerProbeAndAdminAPI(t *testing.T) {
 	if reportMap == nil || reportMap["mode"] != "custom" {
 		t.Errorf("unexpected scan report payload: %+v", scanData)
 	}
+
+	// 4. Verify /api/admin/firewall/status and strict input validation on /api/admin/firewall/*
+	fwReq, _ := http.NewRequest("GET", ts.URL+"/api/admin/firewall/status", nil)
+	fwReq.AddCookie(cookie)
+	fwRes, err := http.DefaultClient.Do(fwReq)
+	if err != nil || fwRes.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/admin/firewall/status failed: err=%v status=%v", err, fwRes)
+	}
+	var fwStatusBody map[string]any
+	rawFW, _ := io.ReadAll(fwRes.Body)
+	fwRes.Body.Close()
+	if err := json.Unmarshal(rawFW, &fwStatusBody); err != nil || fwStatusBody["ok"] != true {
+		t.Fatalf("invalid firewall status JSON: %v (%s)", err, string(rawFW))
+	}
+	fwObj, _ := fwStatusBody["firewall"].(map[string]any)
+	if fwObj == nil || int(fwObj["reality_port"].(float64)) != 28443 {
+		t.Errorf("expected firewall status to reflect RealityPort=28443, got %+v", fwObj)
+	}
+
+	// Reject invalid firewall rule spec before invoking ufw
+	respBadRule, badRuleData := doAdminPost("/api/admin/firewall/rule/add", map[string]any{
+		"action": "allow",
+		"port":   "10000:20000",
+		"proto":  "any", // range without tcp/udp must fail validation
+	})
+	if respBadRule.StatusCode != http.StatusBadRequest || badRuleData["ok"] != false {
+		t.Errorf("expected 400 for invalid range proto=any, got status=%d data=%+v", respBadRule.StatusCode, badRuleData)
+	}
+
+	// Reject unknown firewall action
+	respBadAct, _ := doAdminPost("/api/admin/firewall/action", map[string]any{
+		"action": "flush_all_chains",
+	})
+	if respBadAct.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for unsupported firewall action, got %d", respBadAct.StatusCode)
+	}
 }

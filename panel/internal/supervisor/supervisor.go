@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/config"
+	"github.com/kokmmm33/newsuoha.sh/panel/internal/firewall"
 	"github.com/kokmmm33/newsuoha.sh/panel/internal/subgen"
 )
 
@@ -51,13 +52,13 @@ type Manager struct {
 	xrayRunning bool
 	xrayErr     string
 
-	tunCancel   context.CancelFunc
-	tunRunning  bool
-	tunState    string
-	tunErr      string
-	argoVL      string
-	argoTR      string
-	argoPanel   string
+	tunCancel  context.CancelFunc
+	tunRunning bool
+	tunState   string
+	tunErr     string
+	argoVL     string
+	argoTR     string
+	argoPanel  string
 }
 
 func NewManager(store *config.Store, logs *RingLog, onSync func()) *Manager {
@@ -94,6 +95,9 @@ func (m *Manager) InitNetworkAndAutostart() {
 		return nil
 	})
 	cfg = m.store.GetConfig()
+	if synced := firewall.SyncPanelPorts(context.Background(), cfg, false); len(synced) > 0 {
+		m.logs.Add("panel", "系统防火墙已自动同步放行端口: "+strings.Join(synced, ", "))
+	}
 
 	m.triggerSync()
 

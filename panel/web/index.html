@@ -84,6 +84,7 @@
       <button type="button" class="nav-tab" data-tab="sub" id="nav-tab-sub">订阅与节点</button>
       <button type="button" class="nav-tab" data-tab="protocols" id="nav-tab-protocols">协议配置</button>
       <button type="button" class="nav-tab" data-tab="preferred" id="nav-tab-preferred">优选 IP 管理</button>
+      <button type="button" class="nav-tab" data-tab="firewall" id="nav-tab-firewall">防火墙 (UFW)</button>
       <button type="button" class="nav-tab" data-tab="settings" id="nav-tab-settings">日志与设置</button>
     </nav>
 
@@ -384,7 +385,7 @@
           <div class="field">
             <label class="field-label" for="proto-reality-port">
               <span>Reality 公网监听端口 (TCP)</span>
-              <span class="field-hint">请确保防火墙/安全组放行该端口</span>
+              <span class="field-hint">保存时系统防火墙自动放行；云厂商安全组需在后台放行</span>
             </label>
             <input id="proto-reality-port" type="number" min="1" max="65535" class="mono" placeholder="24443 或 443" />
           </div>
@@ -747,7 +748,123 @@
       </article>
     </section>
 
-    <!-- ==================== Tab 5: Logs & Panel Settings ==================== -->
+    <!-- ==================== Tab 5: VPS Firewall Management (UFW) ==================== -->
+    <section id="pane-firewall" class="section-stack hidden">
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">VPS 系统内部防火墙 (UFW) 控制中心</h2>
+            <p class="card-desc">可视化管理 Linux UFW 防火墙。开启 UFW 或修改协议/面板端口时，面板会自动放行本机 SSH、面板及启用中的 Reality / IPv6 SS 端口，防止误锁失联。</p>
+          </div>
+          <div class="card-actions">
+            <button id="btn-fw-install" type="button" class="btn btn-primary btn-sm hidden">一键安装 UFW</button>
+            <button id="btn-fw-sync" type="button" class="btn btn-sm">一键放行本面板端口</button>
+            <button id="btn-fw-enable" type="button" class="btn btn-primary btn-sm">安全启用 UFW</button>
+            <button id="btn-fw-disable" type="button" class="btn btn-danger btn-sm">停用 UFW</button>
+            <button id="btn-fw-refresh" type="button" class="btn btn-sm">刷新</button>
+          </div>
+        </div>
+
+        <div id="fw-backend-banner" class="helper-banner hidden" style="margin-bottom:14px;"></div>
+
+        <div class="kv-list">
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">UFW 防火墙状态与默认策略</div>
+              <div id="val-fw-state" class="kv-value mono">检测中...</div>
+            </div>
+          </div>
+          <div class="kv-item">
+            <div class="kv-meta">
+              <div class="kv-label">防失联保护与自动同步端口 <span class="badge-tag">自动联动</span></div>
+              <div id="val-fw-protected" class="kv-value mono">-</div>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">添加 UFW 入站规则</h2>
+            <p class="card-desc">支持单端口（如 <code>443</code>）、端口范围（如 <code>10000:20000</code>，需指定 TCP 或 UDP）以及限制指定来源 IP / CIDR 网段。</p>
+          </div>
+        </div>
+
+        <div class="port-pills" id="fw-quick-pills" style="margin-bottom:12px;">
+          <button type="button" class="port-pill" data-fw-port="22" data-fw-proto="tcp" data-fw-cmt="SSH">SSH (22/tcp)</button>
+          <button type="button" class="port-pill" data-fw-port="80" data-fw-proto="tcp" data-fw-cmt="HTTP">HTTP (80/tcp)</button>
+          <button type="button" class="port-pill" data-fw-port="443" data-fw-proto="tcp" data-fw-cmt="HTTPS">HTTPS (443/tcp)</button>
+          <button type="button" class="port-pill" data-fw-port="443" data-fw-proto="udp" data-fw-cmt="QUIC">QUIC (443/udp)</button>
+          <button type="button" class="port-pill" data-fw-role="panel">当前面板端口</button>
+          <button type="button" class="port-pill" data-fw-role="reality">当前 Reality 端口</button>
+        </div>
+
+        <div class="form-grid cols-3">
+          <div class="field">
+            <label class="field-label" for="fw-add-action">规则动作</label>
+            <select id="fw-add-action">
+              <option value="allow">允许放行 (ALLOW)</option>
+              <option value="deny">静默丢弃 (DENY)</option>
+              <option value="reject">拒绝响应 (REJECT)</option>
+              <option value="limit">连接限速防爆破 (LIMIT)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="fw-add-port">端口 / 端口段</label>
+            <input id="fw-add-port" type="text" class="mono" placeholder="例如: 8443 或 10000:20000" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="fw-add-proto">传输协议</label>
+            <select id="fw-add-proto">
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+              <option value="any">TCP + UDP</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="fw-add-from">来源地址 (留空为任意来源 Anywhere)</label>
+            <input id="fw-add-from" type="text" class="mono" placeholder="留空表示所有 IP，或填 1.2.3.4 / 10.0.0.0/24" />
+          </div>
+          <div class="field span-2">
+            <label class="field-label" for="fw-add-comment">规则备注 (可选)</label>
+            <div class="input-row">
+              <input id="fw-add-comment" type="text" placeholder="例如: Reality 直连 / 自建服务" />
+              <button id="btn-fw-add-rule" type="button" class="btn btn-primary">添加规则</button>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">当前 UFW 防火墙规则列表 (<span id="fw-rules-count">0</span>)</h2>
+            <p class="card-desc">注意：VPS 系统内部防火墙放行后，若使用阿里云、腾讯云、AWS、甲骨文等带有外部网页控制台「安全组」的机器，仍需在云厂商后台放行对应入站端口。</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:70px;">编号</th>
+                <th>目标端口 / 协议 (To)</th>
+                <th style="width:120px;">动作</th>
+                <th>允许来源 (From)</th>
+                <th>备注说明</th>
+                <th style="width:90px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="fw-rules-tbody">
+              <tr><td colspan="6" class="empty-placeholder">正在读取系统 UFW 防火墙规则...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <!-- ==================== Tab 6: Logs & Panel Settings ==================== -->
     <section id="pane-settings" class="section-stack hidden">
       <article class="panel-card">
         <div class="card-header">
