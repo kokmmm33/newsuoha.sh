@@ -524,7 +524,7 @@ interactive_menu() {
         echo " 1. 查看面板访问地址、订阅链接与客户端命令"
         echo " 2. 重置面板管理员账号与密码"
         echo " 3. 修改面板与订阅共用监听端口"
-        echo " 4. 开启 / 关闭 Argo 隧道穿透访问面板后台"
+        echo " 4. 管理 Cloudflare Argo 隧道 (网页授权绑定域名 / 临时隧道 / 穿透开关)"
         echo " 5. 管理 VLESS+Reality+Vision 直连节点 (开关/扫描/设置SNI)"
         echo " 6. 管理 VPS 系统内部防火墙 (UFW 开关 / 放行端口 / 规则列表)"
         echo " 7. 重启面板服务"
@@ -557,29 +557,49 @@ interactive_menu() {
                 ;;
             4)
                 echo "----------------------------------------------------------"
-                echo " 1. 一键开启 Argo 临时隧道穿透面板 (自动分配 https://*.trycloudflare.com 地址)"
-                echo " 2. 允许通过已有 Argo 隧道访问管理面板 (on)"
-                echo " 3. 禁止通过 Argo 隧道访问管理面板，仅保留订阅 (off)"
+                echo "          Cloudflare Argo 隧道与固定域名终端管理          "
                 echo "----------------------------------------------------------"
-                read -r -p "请选择 [1-3, 默认 1]: " argo_choice
+                echo " 1. 网页授权绑定固定二级域名 (自动创建 Named Tunnel + 配置 DNS 解析)"
+                echo " 2. 执行 / 重新执行 Cloudflare 网页授权 (获取或切换主域名 cert.pem)"
+                echo " 3. 一键开启 Argo 临时隧道穿透面板 (自动分配 https://*.trycloudflare.com)"
+                echo " 4. 允许通过已有 Argo 隧道访问管理面板 (on)"
+                echo " 5. 禁止通过 Argo 隧道访问管理面板，仅保留订阅 (off)"
+                echo " 0. 返回主菜单"
+                echo "----------------------------------------------------------"
+                read -r -p "请选择 [0-5, 默认 1]: " argo_choice
                 case "${argo_choice:-1}" in
-                    1|quick)
+                    1|named|bind)
+                        read -r -p "请输入要绑定的完整二级域名 (如 sub.example.com): " argo_domain
+                        if [ -z "${argo_domain:-}" ]; then
+                            warn "未输入域名，已取消操作。"
+                        elif "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" named "$argo_domain"; then
+                            service_restart
+                            ok "固定命名隧道服务已重启生效！"
+                            "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
+                        fi
+                        ;;
+                    2|login|auth)
+                        "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" login --force
+                        ;;
+                    3|quick)
                         if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" quick; then
                             service_restart
                             "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
                         fi
                         ;;
-                    2|on)
+                    4|on)
                         if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" on; then
                             service_restart
                             ok "Argo 面板穿透权限已开启。"
                         fi
                         ;;
-                    3|off)
+                    5|off)
                         if "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" off; then
                             service_restart
                             ok "已关闭通过 Argo 隧道访问面板后台。"
                         fi
+                        ;;
+                    0)
                         ;;
                     *)
                         warn "无效选项"
@@ -647,11 +667,35 @@ main() {
             require_root
             shift
             local a_act="${1:-quick}"
-            "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$a_act"
-            service_restart
-            if [ "$a_act" = "quick" ]; then
-                "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
-            fi
+            case "$a_act" in
+                login|auth|oauth)
+                    shift || true
+                    "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" login "$@"
+                    ;;
+                named|bind|domain)
+                    shift || true
+                    local a_dom="${1:-}"
+                    if [ -z "$a_dom" ]; then
+                        read -r -p "请输入要绑定的完整二级域名 (如 sub.example.com): " a_dom
+                    else
+                        shift || true
+                    fi
+                    if [ -z "${a_dom:-}" ]; then
+                        err "请指定要绑定的完整二级域名，例如: suoha argo named sub.example.com"
+                        exit 1
+                    fi
+                    "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" named "$a_dom" "$@"
+                    service_restart
+                    "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
+                    ;;
+                *)
+                    "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" "$@"
+                    service_restart
+                    if [ "$a_act" = "quick" ]; then
+                        "$PANEL_BIN" argo-panel -data-dir "$DATA_DIR" wait
+                    fi
+                    ;;
+            esac
             ;;
         reality)
             require_root
@@ -698,7 +742,7 @@ main() {
             fi
             ;;
         *)
-            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <quick|on|off>|reality <status|on|off|sni|port|rekey|scan>|ufw <status|sync|enable|disable|allow|deny|delete|install>|start|stop|restart|update|uninstall]"
+            echo "用法: suoha [install|info|reset-pwd|port <端口>|argo <quick|named <域名>|login|on|off>|reality <status|on|off|sni|port|rekey|scan>|ufw <status|sync|enable|disable|allow|deny|delete|install>|start|stop|restart|update|uninstall]"
             exit 1
             ;;
     esac

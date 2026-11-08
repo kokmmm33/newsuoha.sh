@@ -42,6 +42,8 @@
     realityScanResults: [],
     formHydrated: false,
     pollTimer: null,
+    oauthPollTimer: null,
+    lastOAuthState: "idle",
     currentQRText: ""
   };
 
@@ -174,10 +176,14 @@
       clearTimeout(state.pollTimer);
       state.pollTimer = null;
     }
+    stopOAuthPolling();
   }
 
   function schedulePolling(delayMs) {
-    stopPolling();
+    if (state.pollTimer) {
+      clearTimeout(state.pollTimer);
+      state.pollTimer = null;
+    }
     if (!state.authenticated) return;
     state.pollTimer = setTimeout(async () => {
       await loadOverview(false);
@@ -193,8 +199,13 @@
       const data = await apiFetch("/api/admin/overview", { method: "GET" });
       state.overview = data;
       renderLiveStatus(data);
+      renderOAuthStatus(data.oauth || {}, data.config || {});
       renderSubscriptionsAndNodes(data);
       renderClientHelper(data);
+
+      if (data.oauth && (data.oauth.state === "starting" || data.oauth.state === "waiting") && !state.oauthPollTimer) {
+        startOAuthPolling();
+      }
 
       if (hydrateForms || !state.formHydrated) {
         hydrateAllForms(data);
@@ -273,8 +284,10 @@
       }
     }
 
-    $("val-argo-vl").textContent = st.argo_vl || (st.tunnel_state === "starting" ? "正在分配临时隧道域名..." : "暂未启动");
-    $("val-argo-tr").textContent = st.argo_tr || (st.tunnel_state === "starting" ? "正在分配临时隧道域名..." : "暂未启动");
+    const isFixedMode = cfg.tunnel && (cfg.tunnel.mode === "named" || cfg.tunnel.mode === "token");
+    const startingHint = isFixedMode ? "正在连接固定隧道域名..." : "正在分配临时隧道域名...";
+    $("val-argo-vl").textContent = st.argo_vl || (st.tunnel_state === "starting" ? startingHint : "暂未启动");
+    $("val-argo-tr").textContent = st.argo_tr || (st.tunnel_state === "starting" ? startingHint : "暂未启动");
     $("val-argo-panel").textContent = st.argo_panel
       ? "https://" + st.argo_panel + (cfg.allow_argo_panel ? "/" : " (面板后台访问已关闭，仅订阅可用)")
       : "未开启穿透域名";
@@ -1080,25 +1093,173 @@
     }
   }
 
-  // ==================== Tunnel Mode UI Helpers ====================
+  // ==================== Tunnel Mode & Browser OAuth Helpers ====================
   function setTunnelModeUI(mode) {
-    state.tunnelMode = mode === "token" ? "token" : "quick";
+    state.tunnelMode = mode === "named" ? "named" : mode === "token" ? "token" : "quick";
     $("mode-btn-quick").classList.toggle("selected", state.tunnelMode === "quick");
+    if ($("mode-btn-named")) {
+      $("mode-btn-named").classList.toggle("selected", state.tunnelMode === "named");
+    }
     $("mode-btn-token").classList.toggle("selected", state.tunnelMode === "token");
 
+    const isQuick = state.tunnelMode === "quick";
+    const isNamed = state.tunnelMode === "named";
     const isToken = state.tunnelMode === "token";
-    $("field-quick-topology").classList.toggle("hidden", isToken);
-    $("field-token-domain").classList.toggle("hidden", !isToken);
+
+    $("field-quick-topology").classList.toggle("hidden", !isQuick);
+    if ($("field-named-oauth")) $("field-named-oauth").classList.toggle("hidden", !isNamed);
+    if ($("field-named-guide")) $("field-named-guide").classList.toggle("hidden", !isNamed);
+    $("field-token-domain").classList.toggle("hidden", !(isNamed || isToken));
     $("field-token-secret").classList.toggle("hidden", !isToken);
     $("field-token-guide").classList.toggle("hidden", !isToken);
+
+    const domLabel = $("label-custom-domain");
+    if (domLabel) {
+      domLabel.textContent = isNamed ? "第二步：输入要绑定的二级域名" : "绑定的完整二级域名";
+    }
     updateAuxTunnelVisibility();
   }
 
   function updateAuxTunnelVisibility() {
     const enabled = $("tun-enabled").checked;
     const isUnifiedQuick = state.tunnelMode === "quick" && $("tun-quick-topology").value === "unified";
-    // When unified Quick Tunnel is active, the single tunnel already exposes HTTPS sub & panel
-    $("field-aux-panel-tunnel").classList.toggle("hidden", enabled && isUnifiedQuick);
+    const hasUnifiedGateway = isUnifiedQuick || state.tunnelMode === "named" || state.tunnelMode === "token";
+    // When unified Quick Tunnel or Named/Token Tunnel is active, the main tunnel already exposes HTTPS sub & panel
+    $("field-aux-panel-tunnel").classList.toggle("hidden", enabled && hasUnifiedGateway);
+
+    const saveBtn = $("btn-save-tunnel");
+    if (saveBtn) {
+      saveBtn.textContent =
+        state.tunnelMode === "named" && enabled
+          ? "保存并自动创建隧道 & 配置 DNS"
+          : "保存并应用隧道配置";
+    }
+  }
+
+  function stopOAuthPolling() {
+    if (state.oauthPollTimer) {
+      clearTimeout(state.oauthPollTimer);
+      state.oauthPollTimer = null;
+    }
+  }
+
+  function startOAuthPolling() {
+    stopOAuthPolling();
+    if (!state.authenticated) return;
+    state.oauthPollTimer = setTimeout(async () => {
+      try {
+        const res = await apiFetch("/api/admin/tunnel/oauth/status", { method: "GET" });
+        const oauth = res.oauth || {};
+        const prevState = state.lastOAuthState;
+        if (state.overview) {
+          state.overview.oauth = oauth;
+        }
+        renderOAuthStatus(oauth, (state.overview && state.overview.config) || {});
+
+        if (oauth.state === "starting" || oauth.state === "waiting") {
+          startOAuthPolling();
+          return;
+        }
+        stopOAuthPolling();
+        if (oauth.state === "succeeded" && prevState !== "succeeded") {
+          if (state.tunnelMode === "named" && !$("tun-enabled").checked) {
+            $("tun-enabled").checked = true;
+            updateAuxTunnelVisibility();
+          }
+          showToast("Cloudflare 网页授权成功！请输入二级域名并点击保存自动创建隧道");
+          const domInput = $("tun-custom-domain");
+          if (domInput && state.tunnelMode === "named") {
+            domInput.focus();
+          }
+        } else if (oauth.state === "error" && prevState !== "error" && oauth.error) {
+          showToast(oauth.error, true);
+        }
+      } catch (_) {
+        stopOAuthPolling();
+      }
+    }, 1500);
+  }
+
+  function renderOAuthStatus(oauth, cfg) {
+    oauth = oauth || {};
+    state.lastOAuthState = oauth.state || "idle";
+
+    const badge = $("named-oauth-badge");
+    const desc = $("named-oauth-desc");
+    const startBtn = $("btn-oauth-start");
+    const cancelBtn = $("btn-oauth-cancel");
+    const urlBox = $("named-oauth-url-box");
+    const urlCode = $("val-oauth-url");
+    const openLink = $("link-oauth-open");
+    const tunInfo = $("val-named-tunnel-info");
+
+    const tun = (cfg && cfg.tunnel) || {};
+    if (tunInfo) {
+      if (tun.named_tunnel_name && tun.named_tunnel_uuid) {
+        const boundDom = tun.custom_domain ? ` · 绑定域名: ${tun.custom_domain}` : "";
+        tunInfo.textContent = `已配置命名隧道: ${tun.named_tunnel_name} (UUID: ${tun.named_tunnel_uuid})${boundDom}`;
+      } else {
+        tunInfo.textContent =
+          "当前尚未绑定命名隧道（完成第一步授权后，填写二级域名并点击下方保存即可自动创建）";
+      }
+    }
+
+    if (!badge || !desc || !startBtn || !cancelBtn || !urlBox) return;
+
+    const inProgress = oauth.state === "starting" || oauth.state === "waiting";
+    cancelBtn.classList.toggle("hidden", !inProgress);
+
+    if (inProgress) {
+      badge.className = "badge-proto trojan";
+      badge.textContent = oauth.state === "waiting" ? "等待浏览器授权..." : "正在生成链接...";
+      startBtn.disabled = true;
+      startBtn.textContent = "等待授权中...";
+      startBtn.className = "btn btn-sm";
+      desc.textContent = oauth.authorized
+        ? "正在等待新主域名的浏览器授权确认（若取消等待，原有的 cert.pem 授权凭据仍会安全保留）。"
+        : "正在等待您在浏览器中打开下方 Cloudflare 链接并选择主域名完成授权...";
+
+      urlBox.classList.remove("hidden");
+      if (oauth.auth_url) {
+        urlCode.textContent = oauth.auth_url;
+        openLink.href = oauth.auth_url;
+        openLink.classList.remove("hidden");
+      } else {
+        urlCode.textContent = "正在向 Cloudflare 请求生成专属授权链接，请稍候...";
+        openLink.href = "#";
+        openLink.classList.add("hidden");
+      }
+      return;
+    }
+
+    urlBox.classList.add("hidden");
+    startBtn.disabled = false;
+
+    if (oauth.authorized) {
+      badge.className = "badge-proto ss";
+      badge.textContent = "已完成网页授权";
+      startBtn.textContent = "重新网页授权 (切换主域名)";
+      startBtn.className = "btn btn-sm";
+      const timeNote = oauth.cert_updated ? `（凭据更新于 ${oauth.cert_updated}）` : "";
+      if (oauth.state === "error" && oauth.error) {
+        desc.textContent = `已有授权凭据仍有效${timeNote}；上次重新授权提示：${oauth.error}`;
+      } else {
+        desc.textContent = `已就绪${timeNote}。同主域名下可直接在下方输入或更换任意二级域名（如 sub.example.com），无需重复授权。`;
+      }
+    } else if (oauth.state === "error" && oauth.error) {
+      badge.className = "badge-proto danger";
+      badge.textContent = "授权未完成";
+      startBtn.textContent = "重新生成 Cloudflare 授权链接";
+      startBtn.className = "btn btn-primary btn-sm";
+      desc.textContent = oauth.error;
+    } else {
+      badge.className = "badge-proto muted";
+      badge.textContent = "未授权";
+      startBtn.textContent = "生成 Cloudflare 授权链接";
+      startBtn.className = "btn btn-primary btn-sm";
+      desc.textContent =
+        "点击右侧按钮生成 Cloudflare 授权链接，在浏览器打开并选择主域名完成授权（同主域名下更换二级域名无需重复授权）。";
+    }
   }
 
   // ==================== QR Modal ====================
@@ -1232,11 +1393,70 @@
       }
     });
 
-    // Tunnel Mode Selector
+    // Tunnel Mode Selector & Browser OAuth Actions
     $("mode-btn-quick").addEventListener("click", () => setTunnelModeUI("quick"));
+    if ($("mode-btn-named")) {
+      $("mode-btn-named").addEventListener("click", () => setTunnelModeUI("named"));
+    }
     $("mode-btn-token").addEventListener("click", () => setTunnelModeUI("token"));
     $("tun-enabled").addEventListener("change", updateAuxTunnelVisibility);
     $("tun-quick-topology").addEventListener("change", updateAuxTunnelVisibility);
+
+    if ($("btn-oauth-start")) {
+      $("btn-oauth-start").addEventListener("click", async () => {
+        const btn = $("btn-oauth-start");
+        btn.disabled = true;
+        try {
+          showToast("正在请求 Cloudflare 生成网页授权链接...");
+          const res = await apiFetch("/api/admin/tunnel/oauth/start", {
+            method: "POST",
+            body: JSON.stringify({
+              edge_ip_version: $("tun-edge-ip").value || "4"
+            })
+          });
+          const oauth = res.oauth || {};
+          if (state.overview) {
+            state.overview.oauth = oauth;
+          }
+          renderOAuthStatus(oauth, (state.overview && state.overview.config) || {});
+          if (oauth.state === "starting" || oauth.state === "waiting") {
+            startOAuthPolling();
+            if (oauth.auth_url) {
+              showToast("授权链接已生成，请在浏览器中打开完成域名授权");
+            }
+          } else if (oauth.authorized) {
+            if (!$("tun-enabled").checked) {
+              $("tun-enabled").checked = true;
+              updateAuxTunnelVisibility();
+            }
+            showToast("Cloudflare 网页授权已完成！");
+          }
+        } catch (err) {
+          btn.disabled = false;
+          showToast(err.message, true);
+        }
+      });
+    }
+
+    if ($("btn-oauth-cancel")) {
+      $("btn-oauth-cancel").addEventListener("click", async () => {
+        stopOAuthPolling();
+        try {
+          const res = await apiFetch("/api/admin/tunnel/oauth/cancel", {
+            method: "POST",
+            body: "{}"
+          });
+          const oauth = res.oauth || {};
+          if (state.overview) {
+            state.overview.oauth = oauth;
+          }
+          renderOAuthStatus(oauth, (state.overview && state.overview.config) || {});
+          showToast("已取消本次网页授权等待");
+        } catch (err) {
+          showToast(err.message, true);
+        }
+      });
+    }
 
     $("btn-detect-net").addEventListener("click", async () => {
       try {
@@ -1265,13 +1485,20 @@
           custom_domain: $("tun-custom-domain").value.trim(),
           cf_token: $("tun-cf-token").value.trim()
         };
+        if (payload.enabled && payload.mode === "named") {
+          showToast("正在自动创建/复用命名隧道并配置 Cloudflare DNS 解析，请稍候...");
+        }
         await apiFetch("/api/admin/tunnel/apply", {
           method: "POST",
           body: JSON.stringify(payload)
         });
         await loadOverview(true);
         schedulePolling(1800);
-        showToast("隧道配置已保存并生效");
+        showToast(
+          payload.enabled && payload.mode === "named"
+            ? "命名隧道与 Cloudflare DNS 解析已自动配置并启动生效"
+            : "隧道配置已保存并生效"
+        );
       } catch (err) {
         showToast(err.message, true);
       } finally {

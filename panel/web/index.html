@@ -151,8 +151,12 @@
             <span class="mode-option-title">梭哈模式 (Quick Tunnel)</span>
             <span class="mode-option-sub">无需自有域名与证书，自动分配 *.trycloudflare.com 临时隧道并守护自愈</span>
           </button>
+          <button type="button" id="mode-btn-named" class="mode-option" data-mode="named">
+            <span class="mode-option-title">网页授权固定隧道 <span class="badge-tag">自动 DNS</span></span>
+            <span class="mode-option-sub">生成 Cloudflare 授权链接，输入二级域名自动创建命名隧道并配置 DNS 解析</span>
+          </button>
           <button type="button" id="mode-btn-token" class="mode-option" data-mode="token">
-            <span class="mode-option-title">固定隧道 (CF Zero Trust Token)</span>
+            <span class="mode-option-title">Token 固定隧道 (Zero Trust)</span>
             <span class="mode-option-sub">直接粘贴 Cloudflare Zero Trust 隧道 Token，长期绑定自定义二级域名</span>
           </button>
         </div>
@@ -168,6 +172,38 @@
                 <input id="tun-enabled" type="checkbox" />
                 <span class="toggle-track"></span>
               </label>
+            </div>
+          </div>
+
+          <!-- Browser OAuth Named Tunnel Step 1 -->
+          <div class="field span-2 hidden" id="field-named-oauth">
+            <div class="oauth-step-box">
+              <div class="oauth-step-header">
+                <div class="oauth-step-meta">
+                  <div class="oauth-step-title">
+                    <span>第一步：Cloudflare 网页域名授权</span>
+                    <span id="named-oauth-badge" class="badge-proto muted">未授权</span>
+                  </div>
+                  <div id="named-oauth-desc" class="oauth-step-sub">
+                    点击右侧按钮生成 Cloudflare 授权链接，在浏览器打开并选择主域名完成授权（同主域名下更换二级域名无需重复授权）。
+                  </div>
+                </div>
+                <div class="card-actions">
+                  <button type="button" id="btn-oauth-start" class="btn btn-primary btn-sm">生成 Cloudflare 授权链接</button>
+                  <button type="button" id="btn-oauth-cancel" class="btn btn-sm hidden">取消等待</button>
+                </div>
+              </div>
+
+              <div id="named-oauth-url-box" class="oauth-url-panel hidden">
+                <div class="oauth-url-tip">请在浏览器中打开下方授权链接，登录 Cloudflare 并选择要绑定的主域名（完成后本页会自动检测更新）：</div>
+                <div class="code-strip">
+                  <code id="val-oauth-url">-</code>
+                  <div class="card-actions">
+                    <button type="button" class="btn btn-sm" data-copy-target="val-oauth-url">复制链接</button>
+                    <a id="link-oauth-open" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">打开授权页面</a>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -188,10 +224,23 @@
             </select>
           </div>
 
-          <!-- CF Zero Trust Token Exclusive Fields -->
+          <!-- Custom Subdomain Field (Shared by Named Tunnel & CF Token Modes) -->
           <div class="field hidden" id="field-token-domain">
-            <label class="field-label" for="tun-custom-domain">绑定的完整二级域名</label>
+            <label class="field-label" for="tun-custom-domain">
+              <span id="label-custom-domain">绑定的完整二级域名</span>
+              <span class="field-hint">归属已托管至 Cloudflare 的主域名</span>
+            </label>
             <input id="tun-custom-domain" type="text" class="mono" placeholder="例如: sub.example.com" />
+          </div>
+
+          <div class="field span-2 hidden" id="field-named-guide">
+            <div class="helper-banner">
+              <strong>全自动命名隧道 (Named Tunnel) 与 DNS 路由说明：</strong>
+              <span id="val-named-tunnel-info" class="mono" style="display:block;margin-top:4px;font-size:12px;">当前尚未绑定命名隧道（完成第一步授权后，填写二级域名并点击下方保存即可自动创建）</span>
+              <span style="display:block;margin-top:6px;font-size:12px;opacity:0.9;">
+                保存应用时，面板将自动创建（或无损复用）命名隧道、在 Cloudflare DNS 写入 CNAME 解析记录，并通过本地统一网关同时承载 VLESS-WS、Trojan-WS、HTTPS 订阅与管理面板（绝不删除云端任何已有隧道）。
+              </span>
+            </div>
           </div>
 
           <div class="field span-2 hidden" id="field-token-secret">

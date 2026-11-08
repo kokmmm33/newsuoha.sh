@@ -25,9 +25,10 @@
 * **单端口合一 + 免开端口 Argo 穿透访问**：
   * **单端口统一网关**：Web 管理面板、订阅服务 (`sub.txt` / `clash.yaml`)、客户端优选上报 API 与本地 WebSocket 分流共用同一个固定端口（自动迁移并兼容旧版 `/etc/suoha_sub_port`）。
   * **免开端口穿透支持**：无公网端口或 NAT 机器可直接通过 Cloudflare Argo 隧道的 `https://` 域名免证书登录 Web 后台与拉取订阅（面板内可随时开关后台穿透权限）。
-* **双模式 Argo 隧道常驻守护与自愈**：
+* **三模式 Argo 隧道常驻守护与自愈**：
   * **梭哈模式 (Quick Tunnel)**：无需自有域名，一键生成 `*.trycloudflare.com` 临时隧道；支持进程异常退出或服务器重启后**自动重连自愈并实时刷新订阅文件**。
-  * **固定隧道模式 (CF Zero Trust Token)**：免除繁琐的网页 OAuth `cert.pem` 授权流程，直接在面板粘贴 Cloudflare Zero Trust Tunnel Token 与域名即可；CF 后台只需配置**唯一一条规则**指向本地统一网关端口即可同时打通双协议、HTTPS 订阅与面板。
+  * **网页授权固定隧道 (Browser OAuth + Named Tunnel)**：在 Web 面板或 SSH 终端一键生成 Cloudflare 授权链接并在浏览器完成主域名授权，输入想要绑定的二级域名（如 `sub.example.com`），面板即**全自动创建（或无损恢复复用）命名隧道、自动配置 Cloudflare DNS CNAME 路由解析**，并指向本地统一网关常驻运行（绝不删除云端任何已有隧道）。
+  * **Token 固定隧道 (CF Zero Trust Token)**：支持直接在面板粘贴 Cloudflare Zero Trust Tunnel Token 与域名；CF 后台只需配置**唯一一条规则**指向本地统一网关端口即可同时打通双协议、HTTPS 订阅与面板。
 * **多协议并发共存与无感热重载**：
   * 可视化开关与编辑 **VLESS-Reality-Vision 直连**、**VLESS-WS**、**Trojan-WS** 及 **IPv6 Shadowsocks 直连**节点参数（UUID/密码、SNI 域名、X25519 密钥对、WS 路径、节点前缀、TLS 端口），保存后精准热重载 Xray，不中断现有 Argo 隧道。
 * **自动放行防火墙端口 + 系统服务端口智能识别与 UFW 可视化管理**：
@@ -69,8 +70,11 @@ bash -c "$(wget -qO- https://raw.githubusercontent.com/kokmmm33/newsuoha.sh/main
 面板安装后，随时在 SSH 终端输入 `suoha` 即可打开交互式运维菜单，也支持直接执行子命令：
 
 ```bash
-suoha                # 打开终端交互运维菜单（含 Reality 节点管理与 UFW 防火墙子菜单）
+suoha                # 打开终端交互运维菜单（含 Argo 隧道、Reality 节点与 UFW 防火墙管理）
 suoha info           # 查看面板地址、Reality 状态、订阅直链与客户端启动命令
+suoha argo named sub.example.com    # 网页授权并全自动创建 Named Tunnel + 配置 Cloudflare DNS 解析
+suoha argo login     # 执行或重新执行 Cloudflare 网页域名授权（加 --force 可切换授权主域名）
+suoha argo quick     # 一键启动 Argo 临时穿透隧道并在终端输出 https:// 面板地址（支持 quick/on/off）
 suoha reality on     # 一键开启 VLESS+Reality+Vision 直连节点并自动放行系统防火墙
 suoha reality scan   # 服务器并发扫描检测低延迟可用 SNI 域名（支持 suoha reality scan neighbor）
 suoha reality sni itunes.apple.com  # 自定义修改 Reality 伪装 SNI 域名并热重启生效
@@ -81,7 +85,6 @@ suoha ufw enable     # 安全启用 UFW（自动预放行 SSH、面板及全部�
 suoha ufw allow 443/tcp             # 手动在 UFW 放行指定端口或端口段
 suoha reset-pwd      # 随机重置（或指定）面板管理员密码并重启生效
 suoha port 28080     # 修改面板与订阅共用的固定监听端口（自动同步系统防火墙）
-suoha argo quick     # 一键启动 Argo 临时穿透隧道并在终端输出 https:// 面板地址（支持 quick/on/off）
 suoha restart        # 重启面板及托管的隧道服务
 suoha update         # 在线更新面板二进制内核（完整保留现有配置）
 suoha uninstall      # 彻底卸载服务并清理全部配置与订阅数据
@@ -97,7 +100,8 @@ suoha uninstall      # 彻底卸载服务并清理全部配置与订阅数据
    * 点击 **服务器扫描可用域名**，面板将从服务器直接探测内置 Apple/大厂域名池或同网段 `/24` 邻近网站的 TLS 1.3 + HTTP/2 兼容性与握手延迟，可一键点击 **设为并保存**，也可直接在输入框填写任意自定义域名并点击 **检测此域名**。
 3. **启动 Argo 隧道（无公网端口或需 CDN 优选并发时）**：
    * **快速梭哈**：在【隧道管理】选择 **梭哈模式 (Quick Tunnel)**，勾选“启用 Argo 节点隧道常驻运行”，点击 **保存并应用隧道配置**。面板将自动拉取 `xray` 与 `cloudflared` 内核并分配隧道域名。
-   * **绑定自有域名**：在 Cloudflare Zero Trust 控制台创建 Tunnel，复制 `eyJ...` 令牌粘贴至面板 **固定隧道 (CF Zero Trust Token)**，并在 CF 后台添加一条 *Public Hostname* 指向面板提示的 `http://127.0.0.1:<面板端口>`。
+   * **网页授权绑定二级域名（全自动免进后台配规则）**：选择 **网页授权固定隧道**，第一步点击 **生成 Cloudflare 授权链接** 并在浏览器完成主域名授权；第二步直接输入二级域名（如 `sub.example.com`）并点击保存，面板即自动创建命名隧道并写入 Cloudflare DNS CNAME 解析。
+   * **Zero Trust Token 固定隧道**：也可在 Cloudflare Zero Trust 控制台创建 Tunnel，复制 `eyJ...` 令牌粘贴至 **Token 固定隧道 (Zero Trust)**，并在 CF 后台添加一条 *Public Hostname* 指向面板提示的 `http://127.0.0.1:<面板端口>`。
 4. **开启 IPv6 SS 直连共存（可选）**：进入【协议配置】，勾选“启用 IPv6 Shadowsocks 直连共存部署”，点击“自动检测”填入本机公网 IPv6 后保存，即可热重载注入 SS 节点并自动同步防火墙。
 5. **管理 VPS 系统防火墙（可选）**：进入【防火墙 (UFW)】，在 **「系统运行服务监听端口检测」** 中查看本机全部外部监听服务（如 Caddy、Nginx、Docker 等）及 UFW 放行状态，可一键安装/安全启用/停用 UFW、一键同步放行面板与系统服务端口，或添加自定义端口/来源 IP 规则。
 6. **扫码或复制订阅**：进入【订阅与节点】，可按协议筛选（含 `仅 VLESS-Reality`）并使用客户端扫码、一键唤起导入，或复制直连 HTTP / Argo HTTPS 订阅链接。

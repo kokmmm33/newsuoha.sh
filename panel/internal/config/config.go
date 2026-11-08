@@ -33,12 +33,14 @@ var (
 // TunnelConfig defines Cloudflare Argo tunnel runtime parameters.
 type TunnelConfig struct {
 	Enabled          bool   `json:"enabled"`
-	Mode             string `json:"mode"`               // "quick" | "token"
+	Mode             string `json:"mode"`               // "quick" | "named" | "token"
 	EdgeIPVersion    string `json:"edge_ip_version"`    // "4" | "6"
 	QuickTopology    string `json:"quick_topology"`     // "unified" | "dual"
 	PanelQuickTunnel bool   `json:"panel_quick_tunnel"` // Auxiliary quick tunnel for panel/sub when in dual mode or when main tunnel off
 	CFToken          string `json:"cf_token"`
 	CustomDomain     string `json:"custom_domain"`
+	NamedTunnelName  string `json:"named_tunnel_name,omitempty"`
+	NamedTunnelUUID  string `json:"named_tunnel_uuid,omitempty"`
 }
 
 // ProtocolConfig defines supported protocols: VLESS-WS, Trojan-WS, VLESS-Reality-Vision direct, and IPv6 Shadowsocks direct.
@@ -394,7 +396,7 @@ func (s *Store) normalizeLocked() {
 	if s.cfg.ClientToken == "" {
 		s.cfg.ClientToken = RandomHex(8)
 	}
-	if s.cfg.Tunnel.Mode != "token" {
+	if s.cfg.Tunnel.Mode != "token" && s.cfg.Tunnel.Mode != "named" {
 		s.cfg.Tunnel.Mode = "quick"
 	}
 	if s.cfg.Tunnel.EdgeIPVersion != "6" {
@@ -405,6 +407,8 @@ func (s *Store) normalizeLocked() {
 	}
 	s.cfg.Tunnel.CustomDomain = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s.cfg.Tunnel.CustomDomain, "https://"), "http://"))
 	s.cfg.Tunnel.CustomDomain = strings.TrimRight(s.cfg.Tunnel.CustomDomain, "/")
+	s.cfg.Tunnel.NamedTunnelName = strings.TrimSpace(s.cfg.Tunnel.NamedTunnelName)
+	s.cfg.Tunnel.NamedTunnelUUID = strings.ToLower(strings.TrimSpace(s.cfg.Tunnel.NamedTunnelUUID))
 
 	if strings.TrimSpace(s.cfg.Protocols.UUID) == "" {
 		s.cfg.Protocols.UUID = NewUUID()
@@ -752,4 +756,32 @@ func SanitizeRealityFingerprint(raw string) string {
 		return "chrome"
 	}
 }
+
+// BuildNamedTunnelName converts a domain (e.g. "sub.example.com") into a safe, deterministic
+// Cloudflare Named Tunnel name (e.g. "suoha-sub-example-com") bounded within 54 ASCII characters.
+func BuildNamedTunnelName(domain string) string {
+	d := ExtractRealityDomain(domain)
+	var b strings.Builder
+	lastDash := false
+	for i := 0; i < len(d); i++ {
+		ch := d[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			b.WriteByte(ch)
+			lastDash = false
+		} else if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "node"
+	}
+	name := "suoha-" + slug
+	if len(name) > 54 {
+		name = strings.TrimRight(name[:54], "-")
+	}
+	return name
+}
+
 

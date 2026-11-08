@@ -344,6 +344,12 @@ func (h *Handler) serveAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.handleOverview(w, r)
 	case r.URL.Path == "/api/admin/tunnel/apply" && r.Method == http.MethodPost:
 		h.handleTunnelApply(w, r)
+	case r.URL.Path == "/api/admin/tunnel/oauth/status" && r.Method == http.MethodGet:
+		h.handleTunnelOAuthStatus(w, r)
+	case r.URL.Path == "/api/admin/tunnel/oauth/start" && r.Method == http.MethodPost:
+		h.handleTunnelOAuthStart(w, r)
+	case r.URL.Path == "/api/admin/tunnel/oauth/cancel" && r.Method == http.MethodPost:
+		h.handleTunnelOAuthCancel(w, r)
 	case r.URL.Path == "/api/admin/service/action" && r.Method == http.MethodPost:
 		h.handleServiceAction(w, r)
 	case r.URL.Path == "/api/admin/protocols/apply" && r.Method == http.MethodPost:
@@ -387,14 +393,15 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	cfg := h.store.GetConfig()
 	pref := h.store.GetPreferred()
 	st := h.mgr.Status()
+	oauthSt := h.mgr.OAuthStatus()
 	rt := h.mgr.RuntimeState()
 	bundle := subgen.Generate(cfg, pref, rt)
 
 	// Determine recommended server URL for suoha-client:
-	// Prefer permanent endpoints (Fixed Token custom domain HTTPS, or Direct HTTP IP:Port)
+	// Prefer permanent endpoints (Fixed Named/Token custom domain HTTPS, or Direct HTTP IP:Port)
 	// so daemon clients survive Quick Tunnel rotations; fall back to Quick Tunnel HTTPS on NAT hosts.
 	clientServer := bundle.DirectBaseURL
-	if cfg.Tunnel.Mode == "token" && bundle.ArgoBaseURL != "" {
+	if (cfg.Tunnel.Mode == "token" || cfg.Tunnel.Mode == "named") && bundle.ArgoBaseURL != "" {
 		clientServer = bundle.ArgoBaseURL
 	} else if rt.ServerIP == "" && bundle.ArgoBaseURL != "" {
 		clientServer = bundle.ArgoBaseURL
@@ -408,6 +415,7 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		"ok":            true,
 		"config":        cfgSafe,
 		"status":        st,
+		"oauth":         oauthSt,
 		"preferred":     pref,
 		"subscription":  bundle,
 		"local_gateway": fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort),
@@ -426,11 +434,57 @@ func (h *Handler) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (h *Handler) handleTunnelOAuthStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"oauth": h.mgr.OAuthStatus(),
+	})
+}
+
+func (h *Handler) handleTunnelOAuthStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		EdgeIPVersion string `json:"edge_ip_version"`
+	}
+	_ = decodeJSONBody(r, &req, 4*1024)
+	edgeVer := strings.TrimSpace(req.EdgeIPVersion)
+	if edgeVer == "" {
+		edgeVer = h.store.GetConfig().Tunnel.EdgeIPVersion
+	}
+	st, err := h.mgr.StartOAuthLogin(edgeVer)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"oauth": st,
+	})
+}
+
+func (h *Handler) handleTunnelOAuthCancel(w http.ResponseWriter, _ *http.Request) {
+	h.mgr.CancelOAuthLogin()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"oauth": h.mgr.OAuthStatus(),
+	})
+}
+
 func (h *Handler) handleTunnelApply(w http.ResponseWriter, r *http.Request) {
 	var req config.TunnelConfig
 	if err := decodeJSONBody(r, &req, 64*1024); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "无效的隧道参数"})
 		return
+	}
+
+	oldCfg := h.store.GetConfig()
+	if strings.TrimSpace(req.NamedTunnelName) == "" {
+		req.NamedTunnelName = oldCfg.Tunnel.NamedTunnelName
+	}
+	if strings.TrimSpace(req.NamedTunnelUUID) == "" {
+		req.NamedTunnelUUID = oldCfg.Tunnel.NamedTunnelUUID
+	}
+	if req.Mode != "token" && strings.TrimSpace(req.CFToken) == "" {
+		req.CFToken = oldCfg.Tunnel.CFToken
 	}
 
 	if req.Enabled && req.Mode == "token" {
@@ -442,6 +496,22 @@ func (h *Handler) handleTunnelApply(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请填写完整的二级域名 (如 sub.example.com)"})
 			return
 		}
+	}
+
+	if req.Enabled && req.Mode == "named" {
+		domain := config.ExtractRealityDomain(req.CustomDomain)
+		if !config.IsValidRealityDomain(domain) || strings.HasSuffix(strings.ToLower(domain), ".trycloudflare.com") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请填写要绑定的完整二级域名 (例如 sub.example.com)"})
+			return
+		}
+		provRes, err := h.mgr.ProvisionNamedTunnel(r.Context(), domain, req.EdgeIPVersion)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		req.CustomDomain = provRes.Domain
+		req.NamedTunnelName = provRes.TunnelName
+		req.NamedTunnelUUID = provRes.TunnelUUID
 	}
 
 	_, err := h.store.UpdateConfig(func(draft *config.PanelConfig) error {
@@ -458,7 +528,11 @@ func (h *Handler) handleTunnelApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.SyncStaticSubscriptions()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"tunnel_name": req.NamedTunnelName,
+		"tunnel_uuid": req.NamedTunnelUUID,
+	})
 }
 
 func (h *Handler) handleServiceAction(w http.ResponseWriter, r *http.Request) {
@@ -859,8 +933,8 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If listen port changed and Quick Tunnel was pointing at ListenPort, restart tunnel smoothly
-	if portChanged && (newCfg.Tunnel.PanelQuickTunnel || (newCfg.Tunnel.Enabled && newCfg.Tunnel.Mode == "quick" && newCfg.Tunnel.QuickTopology == "unified")) {
+	// If listen port changed and local tunnel (Quick or Named) points at ListenPort, restart tunnel smoothly
+	if portChanged && (newCfg.Tunnel.PanelQuickTunnel || (newCfg.Tunnel.Enabled && ((newCfg.Tunnel.Mode == "quick" && newCfg.Tunnel.QuickTopology == "unified") || newCfg.Tunnel.Mode == "named"))) {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
 			_ = h.mgr.RestartTunnel()

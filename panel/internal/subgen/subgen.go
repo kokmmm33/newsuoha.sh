@@ -74,7 +74,7 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 	}
 
 	defaultLabel := "默认Argo"
-	if cfg.Tunnel.Mode == "token" {
+	if cfg.Tunnel.Mode == "token" || cfg.Tunnel.Mode == "named" {
 		defaultLabel = "固定域名"
 	}
 

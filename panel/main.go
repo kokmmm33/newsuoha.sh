@@ -71,7 +71,8 @@ func printUsage() {
   suoha-panel info [-data-dir /opt/suoha]           查看当前面板地址、订阅链接与客户端命令
   suoha-panel reset-password [-user X] [-password Y] 重置管理员账号与登录密码(不指定密码则随机生成)
   suoha-panel set-port [-data-dir /opt/suoha] <端口> 修改面板与订阅共用固定监听端口(自动放行防火墙)
-  suoha-panel argo-panel <on|off|quick>             开启/关闭 Argo 穿透权限，或 quick 一键启动临时隧道穿透面板
+  suoha-panel argo-panel <on|off|quick|login|named <域名>>
+                                                    管理 Argo 穿透权限、临时隧道或网页授权创建固定命名隧道
   suoha-panel reality <status|on|off|sni|port|rekey|scan> [参数]
                                                     管理 VLESS+Reality+Vision 直连节点与扫描可用 SNI 域名
   suoha-panel ufw <status|sync|enable|disable|allow|deny|limit|delete|install> [参数]
@@ -364,6 +365,121 @@ func runArgoPanelToggle(args []string) {
 		}
 		fmt.Println("已开启 Argo 面板穿透并启用临时隧道 (Quick Tunnel)，正在等待服务分配 https:// 穿透域名...")
 
+	case "login", "auth", "oauth":
+		forceReauth := false
+		for _, tok := range rest[1:] {
+			switch strings.ToLower(strings.TrimSpace(tok)) {
+			case "-f", "--force", "-force", "force":
+				forceReauth = true
+			}
+		}
+		var legacyDirs []string
+		if store.SyncLegacyEnabled() {
+			legacyDirs = supervisor.DefaultLegacyCloudflaredDirs()
+		}
+		sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		ctx, cancel := context.WithTimeout(sigCtx, 5*time.Minute)
+		defer cancel()
+
+		_, err := supervisor.RunInteractiveOAuthLogin(
+			ctx,
+			store.DataDir(),
+			store.GetConfig().Tunnel.EdgeIPVersion,
+			legacyDirs,
+			forceReauth,
+			supervisor.NewRingLog(50),
+			os.Stdout,
+		)
+		if err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+		fmt.Println("提示: 接下来可执行 `suoha argo named <二级域名>` 自动创建命名隧道并配置 DNS 解析。")
+
+	case "named", "bind", "domain":
+		var rawDomain string
+		forceReauth := false
+		for _, tok := range rest[1:] {
+			trimmed := strings.TrimSpace(tok)
+			if trimmed == "" {
+				continue
+			}
+			switch strings.ToLower(trimmed) {
+			case "-f", "--force", "-force":
+				forceReauth = true
+			default:
+				if rawDomain == "" {
+					rawDomain = trimmed
+				}
+			}
+		}
+		if rawDomain == "" {
+			log.Fatalf("用法: suoha-panel argo-panel named <完整二级域名, 如 sub.example.com> [--force]")
+		}
+		domain := config.ExtractRealityDomain(rawDomain)
+		if !config.IsValidRealityDomain(domain) || strings.HasSuffix(strings.ToLower(domain), ".trycloudflare.com") {
+			log.Fatalf("[错误] 请填写有效的完整二级域名 (例如 sub.example.com)")
+		}
+
+		var legacyDirs []string
+		if store.SyncLegacyEnabled() {
+			legacyDirs = supervisor.DefaultLegacyCloudflaredDirs()
+		}
+		curCfg := store.GetConfig()
+		ringLogs := supervisor.NewRingLog(80)
+
+		sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		ctx, cancel := context.WithTimeout(sigCtx, 5*time.Minute)
+		defer cancel()
+
+		if _, err := supervisor.RunInteractiveOAuthLogin(
+			ctx,
+			store.DataDir(),
+			curCfg.Tunnel.EdgeIPVersion,
+			legacyDirs,
+			forceReauth,
+			ringLogs,
+			os.Stdout,
+		); err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+
+		fmt.Printf("正在为域名 %s 自动创建/复用命名隧道并配置 Cloudflare DNS 路由解析...\n", domain)
+		res, err := supervisor.ProvisionNamedTunnelWithStore(
+			ctx,
+			store.DataDir(),
+			legacyDirs,
+			ringLogs,
+			domain,
+			curCfg.Tunnel.EdgeIPVersion,
+			curCfg.Tunnel.NamedTunnelName,
+			curCfg.Tunnel.NamedTunnelUUID,
+		)
+		if err != nil {
+			log.Fatalf("[错误] %v", err)
+		}
+
+		_, err = store.UpdateConfig(func(d *config.PanelConfig) error {
+			d.AllowArgoPanel = true
+			d.Tunnel.Enabled = true
+			d.Tunnel.Mode = "named"
+			d.Tunnel.CustomDomain = res.Domain
+			d.Tunnel.NamedTunnelName = res.TunnelName
+			d.Tunnel.NamedTunnelUUID = res.TunnelUUID
+			return nil
+		})
+		if err != nil {
+			log.Fatalf("[错误] 保存命名隧道配置失败: %v", err)
+		}
+
+		actionWord := "已创建"
+		if res.Reused {
+			actionWord = "已复用"
+		}
+		fmt.Printf("[成功] %s命名隧道 %s (%s)，并完成 %s 的 Cloudflare DNS CNAME 解析配置！\n",
+			actionWord, res.TunnelName, res.TunnelUUID, res.Domain)
+
 	case "wait":
 		deadline := time.Now().Add(18 * time.Second)
 		for time.Now().Before(deadline) {
@@ -375,7 +491,7 @@ func runArgoPanelToggle(args []string) {
 		printPanelSummary(store, store.InitialGeneratedPassword())
 
 	default:
-		log.Fatalf("用法: suoha-panel argo-panel <on|off|quick>")
+		log.Fatalf("用法: suoha-panel argo-panel <on|off|quick|login [--force]|named <二级域名>>")
 	}
 }
 
@@ -824,7 +940,7 @@ func printPanelSummary(store *config.Store, plainPwd string) {
 	argoDomain := ""
 	if snapAlive && strings.TrimSpace(snap.ArgoPanel) != "" {
 		argoDomain = strings.TrimSpace(snap.ArgoPanel)
-	} else if cfg.Tunnel.Enabled && cfg.Tunnel.Mode == "token" && strings.TrimSpace(cfg.Tunnel.CustomDomain) != "" {
+	} else if cfg.Tunnel.Enabled && (cfg.Tunnel.Mode == "token" || cfg.Tunnel.Mode == "named") && strings.TrimSpace(cfg.Tunnel.CustomDomain) != "" {
 		argoDomain = strings.TrimSpace(cfg.Tunnel.CustomDomain)
 	}
 

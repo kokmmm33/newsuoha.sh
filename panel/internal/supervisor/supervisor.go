@@ -60,14 +60,24 @@ type Manager struct {
 	argoVL     string
 	argoTR     string
 	argoPanel  string
+
+	oauthSessionID int64
+	oauthCancel    context.CancelFunc
+	oauthState     string
+	oauthURL       string
+	oauthErr       string
+	oauthStartedAt string
+
+	customLegacyCFDirs *[]string
 }
 
 func NewManager(store *config.Store, logs *RingLog, onSync func()) *Manager {
 	return &Manager{
-		store:    store,
-		logs:     logs,
-		onSync:   onSync,
-		tunState: "stopped",
+		store:      store,
+		logs:       logs,
+		onSync:     onSync,
+		tunState:   "stopped",
+		oauthState: "idle",
 	}
 }
 
@@ -183,6 +193,7 @@ func (m *Manager) RuntimeState() subgen.RuntimeState {
 
 // Shutdown stops all managed child processes cleanly.
 func (m *Manager) Shutdown() {
+	m.CancelOAuthLogin()
 	m.StopTunnel()
 	m.StopXray()
 	if m.store != nil && m.store.DataDir() != "" {
@@ -491,6 +502,36 @@ func (m *Manager) RestartTunnel() error {
 		}
 	}
 
+	var namedDomain, namedUUID, namedCredPath string
+	if tun.Enabled && tun.Mode == "named" {
+		namedDomain = config.ExtractRealityDomain(tun.CustomDomain)
+		if !config.IsValidRealityDomain(namedDomain) || strings.HasSuffix(strings.ToLower(namedDomain), ".trycloudflare.com") {
+			return fmt.Errorf("请填写要绑定的完整二级域名 (如 sub.example.com)")
+		}
+		desiredName := config.BuildNamedTunnelName(namedDomain)
+		if tun.NamedTunnelUUID != "" && isMatchingTunnelNameForDomain(tun.NamedTunnelName, desiredName) {
+			if p, ok := ensureLocalOrLegacyCredFile(m.store.DataDir(), m.legacyCloudflaredDirs(), tun.NamedTunnelUUID); ok {
+				namedUUID = strings.ToLower(strings.TrimSpace(tun.NamedTunnelUUID))
+				namedCredPath = p
+			}
+		}
+		if namedUUID == "" {
+			res, err := m.ProvisionNamedTunnel(context.Background(), namedDomain, tun.EdgeIPVersion)
+			if err != nil {
+				return err
+			}
+			namedUUID = res.TunnelUUID
+			namedCredPath = res.CredFile
+			cfg, _ = m.store.UpdateConfig(func(draft *config.PanelConfig) error {
+				draft.Tunnel.CustomDomain = res.Domain
+				draft.Tunnel.NamedTunnelName = res.TunnelName
+				draft.Tunnel.NamedTunnelUUID = res.TunnelUUID
+				return nil
+			})
+			tun = cfg.Tunnel
+		}
+	}
+
 	// Ensure Xray is started if main node tunnel is enabled
 	if tun.Enabled {
 		m.mu.RLock()
@@ -536,6 +577,32 @@ func (m *Manager) RestartTunnel() error {
 		// Only auxiliary panel/subscription quick tunnel
 		localURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
 		go m.superviseQuickTunnel(ctx, cfBin, edgeVer, localURL, "panel-only")
+		m.triggerSync()
+		return nil
+	}
+
+	if tun.Mode == "named" {
+		cfgYAMLPath, err := m.writeNamedTunnelConfig(namedUUID, namedCredPath, namedDomain, cfg.ListenPort)
+		if err != nil {
+			cancel()
+			m.mu.Lock()
+			m.tunState = "error"
+			m.tunErr = err.Error()
+			m.mu.Unlock()
+			return fmt.Errorf("生成命名隧道配置文件失败: %w", err)
+		}
+
+		m.mu.Lock()
+		m.argoVL = namedDomain
+		m.argoTR = namedDomain
+		m.argoPanel = namedDomain
+		m.mu.Unlock()
+
+		go m.superviseNamedTunnel(ctx, cfBin, edgeVer, cfgYAMLPath, namedUUID, namedDomain)
+		if tun.PanelQuickTunnel {
+			localURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
+			go m.superviseQuickTunnel(ctx, cfBin, edgeVer, localURL, "panel-aux")
+		}
 		m.triggerSync()
 		return nil
 	}
