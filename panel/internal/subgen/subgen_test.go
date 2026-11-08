@@ -245,9 +245,11 @@ func TestRealityDirectStandaloneAndCoexistence(t *testing.T) {
 		"type: vless",
 		"flow: xtls-rprx-vision",
 		`servername: "www.apple.com"`,
+		`client-fingerprint: "chrome"`,
 		"reality-opts:",
 		fmt.Sprintf("public-key: %q", cfgStandalone.Protocols.RealityPublicKey),
 		fmt.Sprintf("short-id: %q", cfgStandalone.Protocols.RealityShortID),
+		"support-x25519mlkem768: true",
 		"IP-CIDR,198.51.100.77/32,Server-服务器运维,no-resolve",
 	} {
 		if !strings.Contains(standalone.ClashYAML, ymlFrag) {
@@ -277,8 +279,11 @@ func TestRealityDirectStandaloneAndCoexistence(t *testing.T) {
 	if len(coexist.Nodes) < 4 {
 		t.Fatalf("expected Reality + VLESS + Trojan + SS coexistence nodes, got %d", len(coexist.Nodes))
 	}
-	if coexist.Nodes[0].Protocol != "reality" || !strings.Contains(coexist.Nodes[0].URI, "sni=itunes.apple.com") {
-		t.Errorf("expected first node to be Reality with custom SNI itunes.apple.com, got %+v", coexist.Nodes[0])
+	if coexist.Nodes[0].Protocol != "reality" || !strings.Contains(coexist.Nodes[0].URI, "sni=itunes.apple.com") || !strings.Contains(coexist.Nodes[0].URI, "fp=safari") {
+		t.Errorf("expected first node to be Reality with custom SNI itunes.apple.com and fp=safari, got %+v", coexist.Nodes[0])
+	}
+	if strings.Contains(coexist.ClashYAML, `client-fingerprint: "safari"`) || !strings.Contains(coexist.ClashYAML, "support-x25519mlkem768: true") {
+		t.Errorf("expected coexist ClashYAML to pin Reality client-fingerprint to chrome and enable support-x25519mlkem768:\n%s", coexist.ClashYAML)
 	}
 	verifyClashStructure(t, coexist.ClashYAML, true)
 }
@@ -477,6 +482,10 @@ for k in ("mixed-port", "socks-port", "mode", "sniffer", "dns", "proxies", "prox
 assert len(doc["rule-providers"]) == 34, f"unexpected rule-providers count: {len(doc['rule-providers'])}"
 assert doc["rules"][0] == "PROCESS-NAME-REGEX,(?i)^suoha-client,DIRECT", f"unexpected rule[0]: {doc['rules'][0]}"
 assert doc["rules"][1] == r"PROCESS-NAME-REGEX,(?i)^(cfst|cloudflarespeedtest|cloudflarest)(\.exe)?$,DIRECT", f"unexpected rule[1]: {doc['rules'][1]}"
+for p in doc["proxies"]:
+    if "reality-opts" in p:
+        assert p.get("client-fingerprint") == "chrome", f"Reality client-fingerprint must be chrome, got {p.get('client-fingerprint')}"
+        assert p["reality-opts"].get("support-x25519mlkem768") is True, f"Reality missing support-x25519mlkem768: true in {p}"
 `
 	cmd := exec.Command(py, "-c", script)
 	cmd.Stdin = strings.NewReader(yml)

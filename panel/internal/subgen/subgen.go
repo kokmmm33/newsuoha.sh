@@ -192,10 +192,11 @@ func Generate(cfg config.PanelConfig, pref config.PreferredStore, rt RuntimeStat
 				"    udp: true",
 				"    flow: xtls-rprx-vision",
 				fmt.Sprintf("    servername: %s", yamlQuote(sni)),
-				fmt.Sprintf("    client-fingerprint: %s", yamlQuote(fp)),
+				fmt.Sprintf("    client-fingerprint: %s", yamlQuote("chrome")),
 				"    reality-opts:",
 				fmt.Sprintf("      public-key: %s", yamlQuote(pubKey)),
 				fmt.Sprintf("      short-id: %s", yamlQuote(shortID)),
+				"      support-x25519mlkem768: true",
 			)
 		}
 	}

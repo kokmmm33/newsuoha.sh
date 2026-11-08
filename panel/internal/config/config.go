@@ -746,11 +746,11 @@ func SanitizeRealityShortID(raw string) string {
 	return s
 }
 
-// SanitizeRealityFingerprint validates uTLS client fingerprint names.
+// SanitizeRealityFingerprint validates uTLS client fingerprint names compatible with Xray-core v26.9.9+ X25519MLKEM768 Reality check.
 func SanitizeRealityFingerprint(raw string) string {
 	fp := strings.ToLower(strings.TrimSpace(raw))
 	switch fp {
-	case "chrome", "safari", "ios", "firefox", "edge", "android", "360", "qq", "random", "randomized":
+	case "chrome", "safari", "firefox", "randomized":
 		return fp
 	default:
 		return "chrome"

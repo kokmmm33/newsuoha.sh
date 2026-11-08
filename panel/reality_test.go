@@ -78,6 +78,11 @@ func TestRealityKeyPairAndConfigDefaults(t *testing.T) {
 	if got := config.SanitizeRealityShortID("abc"); got != "0abc" {
 		t.Errorf("SanitizeRealityShortID should pad odd hex to even length, got %q", got)
 	}
+	for _, legacyFP := range []string{"ios", "edge", "random", "qq", ""} {
+		if got := config.SanitizeRealityFingerprint(legacyFP); got != "chrome" {
+			t.Errorf("SanitizeRealityFingerprint(%q) should normalize to 'chrome', got %q", legacyFP, got)
+		}
+	}
 }
 
 func TestBuildXrayConfigRealityInbound(t *testing.T) {
@@ -383,12 +388,24 @@ func TestRealityDomainScannerProbeAndAdminAPI(t *testing.T) {
 	for _, want := range []string{
 		"flow: xtls-rprx-vision",
 		`servername: "updates.cdn-apple.com"`,
+		`client-fingerprint: "chrome"`,
 		fmt.Sprintf("public-key: %q", newPub),
 		fmt.Sprintf("short-id: %q", newSID),
+		"support-x25519mlkem768: true",
 	} {
 		if !strings.Contains(clashText, want) {
 			t.Errorf("clash.yaml missing %q:\n%s", want, clashText)
 		}
+	}
+
+	uiRes, err := http.Get(ts.URL + "/")
+	if err != nil || uiRes.StatusCode != http.StatusOK {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	uiBody, _ := io.ReadAll(uiRes.Body)
+	uiRes.Body.Close()
+	if strings.Contains(string(uiBody), "proto-reality-fp") {
+		t.Errorf("index.html should not expose proto-reality-fp selector")
 	}
 
 	// Verify /api/admin/reality/scan endpoint structure

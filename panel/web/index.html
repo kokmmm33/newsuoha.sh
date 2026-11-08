@@ -423,7 +423,7 @@
         <div class="switch-row" style="margin-bottom:12px;">
           <div class="switch-meta">
             <span class="switch-title">启用 VLESS + Reality + XTLS-RPRX-Vision 直连节点 <span class="badge-tag">高速抗封锁直连</span></span>
-            <span class="switch-sub">免自有域名与证书，直接通过本机公网 IP 伪装为目标 TLS 1.3 网站（默认 Apple 域名 <code>www.apple.com</code>），可独立运行或与 Argo 隧道共存</span>
+            <span class="switch-sub">免自有域名与证书，直接通过本机公网 IP 伪装为目标 TLS 1.3 网站（默认 Apple 域名 <code>www.apple.com</code>，客户端固定使用 <code>chrome</code> 指纹并开启 <code>X25519MLKEM768</code> 后量子握手以兼容新版 Xray / Mihomo），可独立运行或与 Argo 隧道共存</span>
           </div>
           <label class="toggle">
             <input id="proto-reality-enabled" type="checkbox" />
@@ -439,15 +439,10 @@
             <input id="proto-reality-port" type="number" min="1" max="65535" class="mono" placeholder="24443 或 443" />
           </div>
           <div class="field">
-            <label class="field-label" for="proto-reality-fp">客户端 uTLS 指纹 (fp)</label>
-            <select id="proto-reality-fp">
-              <option value="chrome">chrome (默认通用推荐)</option>
-              <option value="safari">safari (Apple 伪装契合)</option>
-              <option value="ios">ios</option>
-              <option value="firefox">firefox</option>
-              <option value="edge">edge</option>
-              <option value="random">random</option>
-            </select>
+            <label class="field-label" for="proto-reality-sid">
+              <span>Reality Short ID (8-16 位十六进制)</span>
+            </label>
+            <input id="proto-reality-sid" type="text" class="mono" placeholder="a1b2c3d4" />
           </div>
 
           <div class="field span-2">
@@ -509,13 +504,7 @@
             </div>
           </div>
 
-          <div class="field">
-            <label class="field-label" for="proto-reality-sid">
-              <span>Reality Short ID (8-16 位十六进制)</span>
-            </label>
-            <input id="proto-reality-sid" type="text" class="mono" placeholder="a1b2c3d4" />
-          </div>
-          <div class="field">
+          <div class="field span-2">
             <label class="field-label" for="proto-reality-pub">
               <span>Reality 公钥 (Public Key / pbk)</span>
               <button id="btn-regen-reality-keys" type="button" class="btn btn-sm" style="padding:2px 8px;font-size:11.5px;">重新生成密钥对</button>

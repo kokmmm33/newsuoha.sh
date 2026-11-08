@@ -320,7 +320,6 @@
     $("proto-tls-port").value = String(proto.tls_default_port || 443);
     $("proto-reality-enabled").checked = !!proto.reality_enabled;
     $("proto-reality-port").value = proto.reality_port || 24443;
-    $("proto-reality-fp").value = proto.reality_fingerprint || "chrome";
     $("proto-reality-sni").value = proto.reality_sni || "www.apple.com";
     $("proto-reality-sid").value = proto.reality_short_id || "";
     $("proto-reality-pub").value = proto.reality_public_key || "";
@@ -633,7 +632,7 @@
           reality_enabled: $("proto-reality-enabled").checked,
           reality_port: Number($("proto-reality-port").value) || 24443,
           reality_sni: $("proto-reality-sni").value.trim() || "www.apple.com",
-          reality_fingerprint: $("proto-reality-fp").value || "chrome",
+          reality_fingerprint: "chrome",
           reality_short_id: $("proto-reality-sid").value.trim(),
           reality_private_key: $("proto-reality-priv").value.trim(),
           reality_public_key: $("proto-reality-pub").value.trim(),
