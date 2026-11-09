@@ -29,6 +29,10 @@ type NodeItem struct {
 	URI      string `json:"uri"`
 }
 
+// ShadowrocketRealityFingerprint is the uTLS fingerprint parameter required for Shadowrocket
+// to select its X25519MLKEM768-capable Chrome140 profile instead of falling back to non-PQ Chrome120.
+const ShadowrocketRealityFingerprint = "chrome140"
+
 // Bundle contains all generated subscription artifacts and metadata URLs.
 type Bundle struct {
 	Nodes          []NodeItem `json:"nodes"`
@@ -42,6 +46,87 @@ type Bundle struct {
 	ArgoBaseURL    string     `json:"argo_base_url,omitempty"`
 	ArgoSubURL     string     `json:"argo_sub_url,omitempty"`
 	ArgoClashURL   string     `json:"argo_clash_url,omitempty"`
+}
+
+// IsShadowrocketUserAgent reports whether an HTTP User-Agent header identifies Shadowrocket.
+func IsShadowrocketUserAgent(ua string) bool {
+	return strings.Contains(strings.ToLower(ua), "shadowrocket")
+}
+
+// ForUserAgent returns a copy of Bundle adapted for client-specific HTTP subscription quirks.
+// For Shadowrocket User-Agents, Reality vless:// URIs emit fp=chrome140 so Shadowrocket selects
+// its X25519MLKEM768-capable Chrome140 profile instead of non-PQ Chrome120, while ClashYAML and
+// non-Shadowrocket clients retain standard cross-client fingerprints.
+func (b Bundle) ForUserAgent(ua string) Bundle {
+	if !IsShadowrocketUserAgent(ua) || len(b.Nodes) == 0 {
+		return b
+	}
+	adaptedNodes := make([]NodeItem, len(b.Nodes))
+	nodesLines := make([]string, 0, len(b.Nodes))
+	changed := false
+	for i, n := range b.Nodes {
+		if n.Protocol == "reality" {
+			rewritten := rewriteRealityURIFingerprint(n.URI, ShadowrocketRealityFingerprint)
+			if rewritten != n.URI {
+				n.URI = rewritten
+				changed = true
+			}
+		}
+		adaptedNodes[i] = n
+		nodesLines = append(nodesLines, n.URI)
+	}
+	if !changed {
+		return b
+	}
+	out := b
+	out.Nodes = adaptedNodes
+	out.NodesTxt = strings.Join(nodesLines, "\n") + "\n"
+	out.SubBase64 = base64.StdEncoding.EncodeToString([]byte(out.NodesTxt))
+	return out
+}
+
+func rewriteRealityURIFingerprint(rawURI, targetFP string) string {
+	if !strings.HasPrefix(strings.ToLower(rawURI), "vless://") {
+		return rawURI
+	}
+	beforeFrag, frag, hasFrag := strings.Cut(rawURI, "#")
+	prefix, rawQuery, hasQuery := strings.Cut(beforeFrag, "?")
+	if !hasQuery || rawQuery == "" {
+		return rawURI
+	}
+
+	parts := strings.Split(rawQuery, "&")
+	isReality := false
+	fpIdx := -1
+	for i, part := range parts {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "security":
+			if strings.EqualFold(v, "reality") {
+				isReality = true
+			}
+		case "fp":
+			fpIdx = i
+		}
+	}
+	if !isReality {
+		return rawURI
+	}
+	escapedFP := "fp=" + url.QueryEscape(targetFP)
+	if fpIdx >= 0 {
+		parts[fpIdx] = escapedFP
+	} else {
+		parts = append(parts, escapedFP)
+	}
+
+	rebuilt := prefix + "?" + strings.Join(parts, "&")
+	if hasFrag {
+		rebuilt += "#" + frag
+	}
+	return rebuilt
 }
 
 type targetEndpoint struct {

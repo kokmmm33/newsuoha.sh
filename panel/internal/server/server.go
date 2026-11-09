@@ -76,7 +76,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	subPrefix := "/" + cfg.SubUUID + "/"
 	if r.Method == http.MethodGet && strings.HasPrefix(reqPath, subPrefix) {
 		fname := strings.TrimPrefix(reqPath, subPrefix)
-		h.serveSubscriptionFile(w, fname, cfg)
+		h.serveSubscriptionFile(w, r, fname, cfg)
 		return
 	}
 
@@ -190,7 +190,7 @@ func (h *Handler) checkClientAuth(r *http.Request, cfg config.PanelConfig) bool 
 	return false
 }
 
-func (h *Handler) serveSubscriptionFile(w http.ResponseWriter, fname string, cfg config.PanelConfig) {
+func (h *Handler) serveSubscriptionFile(w http.ResponseWriter, r *http.Request, fname string, cfg config.PanelConfig) {
 	if fname != "sub.txt" && fname != "clash.yaml" && fname != "nodes.txt" {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "Subscription file not found"})
 		return
@@ -200,15 +200,17 @@ func (h *Handler) serveSubscriptionFile(w http.ResponseWriter, fname string, cfg
 	bundle := subgen.Generate(cfg, pref, rt)
 	_ = subgen.WriteStaticFiles(h.store, bundle)
 
+	served := bundle.ForUserAgent(r.Header.Get("User-Agent"))
+
 	var body []byte
 	contentType := "text/plain; charset=utf-8"
 	switch fname {
 	case "sub.txt":
-		body = []byte(bundle.SubBase64)
+		body = []byte(served.SubBase64)
 	case "nodes.txt":
-		body = []byte(bundle.NodesTxt)
+		body = []byte(served.NodesTxt)
 	case "clash.yaml":
-		body = []byte(bundle.ClashYAML)
+		body = []byte(served.ClashYAML)
 		contentType = "text/yaml; charset=utf-8"
 	}
 
@@ -216,6 +218,7 @@ func (h *Handler) serveSubscriptionFile(w http.ResponseWriter, fname string, cfg
 	w.Header().Set("Profile-Title", "base64:"+titleB64)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Vary", "User-Agent")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }

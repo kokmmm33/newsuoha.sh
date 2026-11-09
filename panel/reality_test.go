@@ -16,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +398,61 @@ func TestRealityDomainScannerProbeAndAdminAPI(t *testing.T) {
 		if !strings.Contains(clashText, want) {
 			t.Errorf("clash.yaml missing %q:\n%s", want, clashText)
 		}
+	}
+
+	// Verify User-Agent aware Reality fingerprint emission on sub.txt / nodes.txt / clash.yaml
+	fetchSubWithUA := func(fname, ua string) (string, http.Header) {
+		t.Helper()
+		req, reqErr := http.NewRequest("GET", fmt.Sprintf("%s/%s/%s", ts.URL, cfg.SubUUID, fname), nil)
+		if reqErr != nil {
+			t.Fatal(reqErr)
+		}
+		if ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+		res, reqErr := http.DefaultClient.Do(req)
+		if reqErr != nil || res.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s (UA=%q) failed: err=%v status=%v", fname, ua, reqErr, res)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return string(b), res.Header
+	}
+
+	srSubB64, srHdr := fetchSubWithUA("sub.txt", "Shadowrocket/2.2.93 CFNetwork/1568.200.51 Darwin/24.1.0")
+	if gotVary := srHdr.Get("Vary"); !strings.Contains(gotVary, "User-Agent") {
+		t.Errorf("expected Vary: User-Agent header on subscription response, got %q", gotVary)
+	}
+	srSubDecoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(srSubB64))
+	if err != nil {
+		t.Fatalf("base64 decode Shadowrocket sub.txt failed: %v", err)
+	}
+	srNodesTxt, _ := fetchSubWithUA("nodes.txt", "Shadowrocket/2.2.93 CFNetwork/1568.200.51 Darwin/24.1.0")
+	if string(srSubDecoded) != srNodesTxt {
+		t.Errorf("Shadowrocket decoded sub.txt != nodes.txt:\nsub=%q\nnodes=%q", string(srSubDecoded), srNodesTxt)
+	}
+	if !strings.Contains(srNodesTxt, "security=reality") || !strings.Contains(srNodesTxt, "&fp=chrome140&") || strings.Contains(srNodesTxt, "&fp=chrome&") {
+		t.Errorf("expected Shadowrocket Reality subscription to emit fp=chrome140 instead of fp=chrome, got:\n%s", srNodesTxt)
+	}
+
+	srClashTxt, _ := fetchSubWithUA("clash.yaml", "Shadowrocket/2.2.93 CFNetwork/1568.200.51 Darwin/24.1.0")
+	if strings.Contains(srClashTxt, "chrome140") || !strings.Contains(srClashTxt, `client-fingerprint: "chrome"`) {
+		t.Errorf("clash.yaml must retain client-fingerprint: chrome regardless of User-Agent:\n%s", srClashTxt)
+	}
+
+	// Verify static files on disk were NOT polluted with fp=chrome140 after Shadowrocket HTTP fetch
+	diskNodesBytes, err := os.ReadFile(filepath.Join(tmp, "sub", cfg.SubUUID, "nodes.txt"))
+	if err != nil {
+		t.Fatalf("read static nodes.txt failed: %v", err)
+	}
+	if !strings.Contains(string(diskNodesBytes), "&fp=chrome&") || strings.Contains(string(diskNodesBytes), "chrome140") {
+		t.Errorf("static on-disk nodes.txt must keep canonical fp=chrome, got:\n%s", string(diskNodesBytes))
+	}
+
+	// Verify non-Shadowrocket clients continue receiving canonical fp=chrome
+	xrayNodesTxt, _ := fetchSubWithUA("nodes.txt", "v2rayNG/1.9.16")
+	if !strings.Contains(xrayNodesTxt, "&fp=chrome&") || strings.Contains(xrayNodesTxt, "chrome140") {
+		t.Errorf("expected v2rayNG Reality subscription to receive fp=chrome, got:\n%s", xrayNodesTxt)
 	}
 
 	uiRes, err := http.Get(ts.URL + "/")

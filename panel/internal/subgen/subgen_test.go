@@ -1,6 +1,7 @@
 package subgen
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -286,6 +287,62 @@ func TestRealityDirectStandaloneAndCoexistence(t *testing.T) {
 		t.Errorf("expected coexist ClashYAML to pin Reality client-fingerprint to chrome and enable support-x25519mlkem768:\n%s", coexist.ClashYAML)
 	}
 	verifyClashStructure(t, coexist.ClashYAML, true)
+
+	// 3. Shadowrocket User-Agent adaptation emits fp=chrome140 only on Reality URIs without mutating canonical bundle
+	for _, srUA := range []string{
+		"Shadowrocket/2.2.93 CFNetwork/1568.200.51 Darwin/24.1.0",
+		"Shadowrocket/1970",
+		"Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) shadowrocket/2.2.93",
+	} {
+		if !IsShadowrocketUserAgent(srUA) {
+			t.Errorf("expected IsShadowrocketUserAgent(%q) == true", srUA)
+		}
+	}
+	for _, otherUA := range []string{
+		"",
+		"v2rayNG/1.9.16",
+		"v2rayN/7.10",
+		"ClashMetaForAndroid/2.11.5.Meta",
+		"mihomo/1.19.15",
+		"curl/8.7.1",
+	} {
+		if IsShadowrocketUserAgent(otherUA) {
+			t.Errorf("expected IsShadowrocketUserAgent(%q) == false", otherUA)
+		}
+		unchanged := standalone.ForUserAgent(otherUA)
+		if unchanged.NodesTxt != standalone.NodesTxt || unchanged.SubBase64 != standalone.SubBase64 {
+			t.Errorf("non-Shadowrocket UA %q should not alter standalone bundle", otherUA)
+		}
+	}
+
+	srStandalone := standalone.ForUserAgent("Shadowrocket/2.2.93 CFNetwork/1568.200.51 Darwin/24.1.0")
+	if !strings.Contains(srStandalone.Nodes[0].URI, "&sni=www.apple.com&fp=chrome140&pbk=") {
+		t.Errorf("expected Shadowrocket Reality URI to preserve parameter order with fp=chrome140, got:\n%s", srStandalone.Nodes[0].URI)
+	}
+	if strings.Contains(srStandalone.NodesTxt, "fp=chrome&") {
+		t.Errorf("Shadowrocket NodesTxt should replace fp=chrome with fp=chrome140:\n%s", srStandalone.NodesTxt)
+	}
+	srDecoded, err := base64.StdEncoding.DecodeString(srStandalone.SubBase64)
+	if err != nil || string(srDecoded) != srStandalone.NodesTxt {
+		t.Fatalf("Shadowrocket SubBase64 mismatch: err=%v decoded=%q want=%q", err, string(srDecoded), srStandalone.NodesTxt)
+	}
+	if srStandalone.ClashYAML != standalone.ClashYAML {
+		t.Errorf("Shadowrocket adaptation must not alter ClashYAML")
+	}
+	if !strings.Contains(standalone.Nodes[0].URI, "fp=chrome&") || strings.Contains(standalone.NodesTxt, "fp=chrome140") {
+		t.Errorf("ForUserAgent must not mutate original canonical bundle:\n%s", standalone.NodesTxt)
+	}
+
+	srCoexist := coexist.ForUserAgent("Shadowrocket/2.2.93")
+	if !strings.Contains(srCoexist.Nodes[0].URI, "fp=chrome140&") {
+		t.Errorf("expected Shadowrocket coexistence Reality URI to emit fp=chrome140, got:\n%s", srCoexist.Nodes[0].URI)
+	}
+	for i := 1; i < len(coexist.Nodes); i++ {
+		if srCoexist.Nodes[i].URI != coexist.Nodes[i].URI {
+			t.Errorf("non-Reality node[%d] (%s) must remain unchanged: got %q, want %q",
+				i, coexist.Nodes[i].Protocol, srCoexist.Nodes[i].URI, coexist.Nodes[i].URI)
+		}
+	}
 }
 
 func verifyClashStructure(t *testing.T, yml string, expectAutoGroups bool) {
